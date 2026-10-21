@@ -1,11 +1,193 @@
-<div align="center">
+# SentinelWall NOC — Мультисервісна система оперативного моніторингу (Production Edition)
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+**SentinelWall NOC** — це готовий до промислового розгортання (Production-Ready) інструмент централізованого спостереження за дашбордами та метриками інфраструктурних сервісів (**Wazuh SIEM**, **Zabbix**, **Ceph / Seph Storage**, **Redis**, **RabbitMQ**, **Prometheus / Kubernetes** та довільних REST/HTTP API) за принципом стіни камер безпеки (CCTV).
 
-  <h1>Built with AI Studio</h2>
+Ця версія постачається **без демонстраційних дашбордів та тестових токенів** — із чистим сховищем, підготовленим для підключення реальних робочих сервісів вашої команди.
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+---
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+## 1. Що використовується для роботи сервісу (Технологічний стек та архітектура)
 
-</div>
+### Frontend (Клієнтський рівень)
+| Компонент / Пакет | Версія | Призначення у системі |
+| :--- | :--- | :--- |
+| **React** + **React DOM** | `^19.0.1` | Побудова реактивного інтерфейсу стіни моніторингу (SPA), керування станом потоків телеметрії (1 Гц) та модальними вікнами. |
+| **TypeScript** | `^7.0.2` | Сувора типізація моделей даних сервісів (`ServiceFeed`), 30-секундних буферів (`MetricSample`), звітів Чорної скриньки (`CrashBlackboxReport`) та бекапів (`CloudBackupSnapshot`). |
+| **Vite** (`@vitejs/plugin-react`) | `^8.3.0` | Високошвидкісний бандлер для збірки оптимізованого продакшен-коду (`dist/`) з мініфікацією ресурсів. |
+| **Tailwind CSS** (`@tailwindcss/vite`) | `^4.3.3` | Утилітарна система стилізації з підтримкою **Темної теми (NOC Dark)** та **Світлої теми (Day Light)**. |
+| **Chart.js** + **react-chartjs-2** | `^4.5.1` / `^5.3.1` | Візуалізація потоків телеметрії у реальному часі на картках камер і в конструкторі дашбордів (типи графіків: `line`, `bar`, `radar`, `doughnut`). |
+| **jsPDF** | `^4.2.1` | Клієнтська генерація та завантаження офіційних PDF-звітів (включно з Canvas-рендерингом кириличних таблиць та дампів 30с). |
+| **Lucide React** | `^0.546.0` | Векторна іконографіка панелі керування NOC. |
+
+### Backend (Серверний рівень та API)
+| Компонент / Пакет | Версія | Призначення у системі |
+| :--- | :--- | :--- |
+| **Node.js** + **Express** | `^4.21.2` | Єдиний сервер застосунку (`server.ts`), який обслуговує REST API (`/api/*`) та роздає статичну продакшен-збірку (`dist/`). |
+| **tsx** / **esbuild** | `^4.21.0` | Виконання TypeScript-сервера без проміжної ручної компіляції у dev та production режимах. |
+| **Сховище стану (`.data/cloud_storage.json`)** | Вбудоване (`fs`) | Персистентне файлове / S3-сумісне JSON-сховище на сервері, де зберігаються підключені командою сервіси, користувацькі графіки Chart.js, історія логів, точки відновлення (бекапи) та налаштування сповіщень. |
+| **Шлюзи сповіщень (Telegram / Slack)** | Fetch API | Серверний проксі-маршрут `POST /api/notify/send` для відправки критичних сповіщень у **Telegram Bot API** (`api.telegram.org`) та **Slack Incoming Webhooks** (`hooks.slack.com`) без CORS-обмежень браузера. |
+
+---
+
+## 2. Ключові підсистеми та принцип роботи
+
+1. **Стіна камер спостереження (CCTV Matrix Wall):**
+   - Відображає підключені сервіси у сітці `2x2`, `3x2`, `3x3` або `1x1` з фільтрацією за групами та миттєвим пошуком.
+   - Кожна камера має власний період опитування (`1с`, `2с`, `3с`, `5с`, `10с`, `30с`) і вибір типу графіка Chart.js.
+   - Видалення будь-якого дашборду захищене лаконічним діалогом підтвердження: *«Чи хочете ви видалити [Назва] дашборд?»* (`Так` / `Ні`).
+2. **Кільцевий буфер 30 секунд (Чорна скринька / Flight Recorder):**
+   - Для кожного підключеного сервісу підтримується безперервний кільцевий буфер `ringBuffer30s` на **30 секунд** (частота дискретизації 1 Гц).
+   - При перевищенні критичного порогу (`criticalThreshold`) система автоматично фіксує посекундний дамп останніх 20–30 секунд метрик, формує діагноз першопричини (*Root Cause Analysis*) та створює автоматичний хмарний бекап.
+3. **Конструктор дашбордів Chart.js:**
+   - Дозволяє будувати додаткові кастомні графіки (`Line`, `Bar`, `Radar`, `Doughnut`) для обраних сервісів, метрик (`primaryValue`, `secondaryValue`, `latencyMs`, `errorRate`) і часових вікон (`15с`, `20с`, `30с`).
+4. **Налаштування системи, теми та діагностики:**
+   - У вкладці **«Налаштування та Сповіщення»** розташовано:
+     - Перемикач **Темної теми** та **Світлої теми** (з автоматичним збереженням вибору у `localStorage`).
+     - Сервісний інструмент **«Тест збою (30с)»** (винесений із головних карток камер у налаштування, щоб оператори не натиснули його випадково під час чергування).
+     - Конфігурація **Telegram Bot Token / Chat ID** та **Slack Webhook URL**.
+     - Експорт звітів у **PDF** та **CSV**.
+
+---
+
+## 3. Як забілдити та запустити проєкт (Локально та на Проді)
+
+### Вимоги до системи
+- **Node.js**: версія `20.x` або `22.x` LTS (рекомендовано)
+- **Пакетний менеджер**: `npm` (входить до складу Node.js) або `bun`
+
+### Крок 1. Клонування та встановлення залежностей
+```bash
+npm install
+```
+
+### Крок 2. Перевірка типів TypeScript та запуск модульних тестів
+Перед збіркою переконайтеся, що ядро моніторингу та типізація проходять усі перевірки:
+```bash
+# Перевірка типів TypeScript
+npm run lint
+
+# Запуск модульних тестів (node:test)
+npm test
+```
+
+### Крок 3. Збірка фронтенду для продакшену (Production Build)
+Команда компілює та мініфікує React + Tailwind CSS + Chart.js застосунок у директорію `dist/`:
+```bash
+npm run build
+```
+Після виконання `npm run build` створюється папка `dist/` з готовими оптимізованими статичними бандлами (`index.html`, CSS та JS-чанки).
+
+### Крок 4. Запуск у режимі Production
+Коли папка `dist/` зібрана, запустіть сервер із прапорцем `NODE_ENV=production`. Сервер Express автоматично роздаватиме зібраний фронтенд із `dist/` та обслуговуватиме API-маршрути `/api/*` на порту `3000` (або порту зі змінної `PORT`):
+```bash
+NODE_ENV=production PORT=3000 npm start
+```
+Для режиму локальної розробки (з гарячим перезавантаженням Vite):
+```bash
+npm run dev
+```
+
+---
+
+## 4. Деплой на продакшен-сервер (Docker / Systemd / Nginx)
+
+### Варіант А: Деплой через Docker (Рекомендовано для продакшену)
+
+Створіть файл `Dockerfile` у корені проєкту:
+```dockerfile
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Копіюємо маніфести залежностей
+COPY package.json ./
+RUN npm install
+
+# Копіюємо вихідний код та збираємо фронтенд у dist/
+COPY . .
+RUN npm run build
+
+# Директорія для збереження стану дашбордів, логів та бекапів
+VOLUME ["/app/.data"]
+
+ENV NODE_ENV=production
+ENV PORT=3000
+EXPOSE 3000
+
+CMD ["npm", "start"]
+```
+
+Приклад `docker-compose.yml` для швидкого підняття сервісу зі збереженням даних на диску хоста:
+```yaml
+services:
+  sentinelwall-noc:
+    build: .
+    container_name: sentinelwall-noc
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    volumes:
+      - ./noc-data:/app/.data
+```
+
+Команда запуску контейнера:
+```bash
+docker compose up -d --build
+```
+
+---
+
+### Варіант Б: Деплой на Linux-сервер (Ubuntu / Debian) через `systemd`
+
+1. Скопіюйте проєкт у `/opt/sentinelwall-noc`, виконайте встановлення та білд:
+   ```bash
+   cd /opt/sentinelwall-noc
+   npm install
+   npm run build
+   ```
+2. Створіть unit-файл `/etc/systemd/system/sentinelwall.service`:
+   ```ini
+   [Unit]
+   Description=SentinelWall NOC Monitoring Server
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=www-data
+   WorkingDirectory=/opt/sentinelwall-noc
+   Environment=NODE_ENV=production
+   Environment=PORT=3000
+   ExecStart=/usr/bin/npm start
+   Restart=on-failure
+   RestartSec=5
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+3. Активуйте та запустіть сервіс:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable sentinelwall
+   sudo systemctl start sentinelwall
+   sudo systemctl status sentinelwall
+   ```
+
+---
+
+## 5. API Ендпоінти сервера (`server.ts`)
+
+| Метод та маршрут | Призначення |
+| :--- | :--- |
+| `GET /api/cloud/state` | Повертає поточний збережений стан сервісів, графіків, логів, бекапів та історії сповіщень із `.data/cloud_storage.json`. |
+| `POST /api/cloud/sync` | Синхронізує додані/оновлені сервіси, кастомні віджети Chart.js, логи та налаштування сповіщень на сервер. |
+| `POST /api/cloud/backups` | Зберігає окремий знімок резервної копії (`CloudBackupSnapshot`) для подальшого відновлення. |
+| `POST /api/notify/send` | Відправляє оперативне сповіщення у **Telegram Bot API** або **Slack Incoming Webhook** та фіксує статус доставки в журналі. |
+
+---
+
+## Ліцензування
+
+**Omega Development 2026 All right reserved**

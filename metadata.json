@@ -1,0 +1,8 @@
+{
+  "name": "Remix SentinelWall NOC — Мультисервісний CCTV Моніторинг",
+  "description": "Єдиний екран спостереження за дашбордами сервісів (Wazuh, Zabbix, Ceph/Seph, Redis, RabbitMQ) за принципом камер безпеки з аналізом останніх 30 секунд метрик при збоях, хмарним бекапом логів та сповіщеннями у Telegram і Slack.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
