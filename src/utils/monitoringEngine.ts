@@ -607,6 +607,461 @@ export function formatDeleteDashboardPrompt(rawName: string): string {
     : `Чи хочете ви видалити ${trimmed} дашборд?`;
 }
 
+export interface StandardPrimaryMetricOption {
+  label: string;
+  defaultUnit: string;
+  defaultThresholdPresetId: string;
+  defaultWarn: number;
+  defaultCrit: number;
+}
+
+export interface StandardSecondaryMetricOption {
+  label: string;
+  defaultUnit: string;
+}
+
+export interface StandardThresholdPresetOption {
+  id: string;
+  label: string;
+  warn: number;
+  crit: number;
+}
+
+export const STANDARD_SERVICE_TYPES: Array<{
+  value: ServiceFeed['serviceType'];
+  label: string;
+}> = [
+  { value: 'custom', label: 'Універсальний HTTP / Prometheus Exporter' },
+  { value: 'wazuh', label: 'Wazuh SIEM / Security Agent' },
+  { value: 'zabbix', label: 'Zabbix Server / JSON-RPC API' },
+  { value: 'ceph', label: 'Ceph (Seph) RADOS / Object Storage' },
+  { value: 'redis', label: 'Redis Cluster / In-Memory Cache' },
+  { value: 'rabbitmq', label: 'RabbitMQ AMQP / Message Broker' },
+];
+
+export const STANDARD_MONITORING_GROUPS: string[] = [
+  'Інфраструктура',
+  'Безпека (SIEM)',
+  'Сховище даних',
+  'Черги та Кеш',
+  'Бази даних (SQL / NoSQL)',
+  'Мережа та Балансувальники',
+  'Контейнери (Kubernetes / Docker)',
+  'Веб-сервери та API Gateway',
+  'Хмарні сервіси (Cloud)',
+];
+
+export const STANDARD_ENDPOINT_TEMPLATES: Array<{
+  label: string;
+  url: string;
+}> = [
+  { label: 'Prometheus Node / Service Exporter (:9100)', url: 'https://metrics.internal.noc:9100/metrics' },
+  { label: 'Wazuh SIEM Manager API (:55000)', url: 'https://wazuh.internal.noc:55000/v4/events' },
+  { label: 'Zabbix JSON-RPC Endpoint', url: 'https://zabbix.internal.noc/api_jsonrpc.php' },
+  { label: 'Ceph (Seph) Manager / RGW (:8443)', url: 'https://ceph-rgw.internal.noc:8443/api/osd' },
+  { label: 'Redis Cluster Info (:6379)', url: 'redis://redis-cluster.internal.noc:6379/info' },
+  { label: 'RabbitMQ Management HTTP API (:15672)', url: 'https://rabbitmq.internal.noc:15672/api/queues' },
+  { label: 'Kubernetes / Prometheus Query API (:9090)', url: 'https://prometheus.internal.noc:9090/api/v1/query' },
+  { label: 'PostgreSQL / Patroni Exporter (:9187)', url: 'https://postgres.internal.noc:9187/metrics' },
+  { label: 'Elasticsearch Cluster Health (:9200)', url: 'https://elastic.internal.noc:9200/_cluster/health' },
+  { label: 'Nginx / HAProxy Ingress Status', url: 'https://ingress.internal.noc/stub_status' },
+];
+
+export const STANDARD_PRIMARY_METRICS: StandardPrimaryMetricOption[] = [
+  {
+    label: 'Завантаження CPU',
+    defaultUnit: '%',
+    defaultThresholdPresetId: 'cpu-std',
+    defaultWarn: 75,
+    defaultCrit: 90,
+  },
+  {
+    label: "Використання RAM (Пам'ять)",
+    defaultUnit: '%',
+    defaultThresholdPresetId: 'ram-high',
+    defaultWarn: 80,
+    defaultCrit: 92,
+  },
+  {
+    label: 'Події безпеки (EPS)',
+    defaultUnit: 'подій/с',
+    defaultThresholdPresetId: 'siem-eps',
+    defaultWarn: 350,
+    defaultCrit: 480,
+  },
+  {
+    label: 'Пропускна здатність пулу',
+    defaultUnit: 'kIOPS',
+    defaultThresholdPresetId: 'storage-iops',
+    defaultWarn: 80,
+    defaultCrit: 105,
+  },
+  {
+    label: 'Операцій читання/запису',
+    defaultUnit: 'тис. ops/s',
+    defaultThresholdPresetId: 'cache-ops',
+    defaultWarn: 115,
+    defaultCrit: 150,
+  },
+  {
+    label: 'Непідтверджені (Unacked)',
+    defaultUnit: 'тис. msg',
+    defaultThresholdPresetId: 'mq-queue',
+    defaultWarn: 40,
+    defaultCrit: 65,
+  },
+  {
+    label: "Споживання пам'яті Pod-ів",
+    defaultUnit: 'ГБ',
+    defaultThresholdPresetId: 'k8s-mem',
+    defaultWarn: 64,
+    defaultCrit: 80,
+  },
+  {
+    label: 'Час відгуку API (Latency)',
+    defaultUnit: 'мс',
+    defaultThresholdPresetId: 'api-latency',
+    defaultWarn: 200,
+    defaultCrit: 450,
+  },
+  {
+    label: 'Інтенсивність запитів (RPS)',
+    defaultUnit: 'req/s',
+    defaultThresholdPresetId: 'http-rps',
+    defaultWarn: 1200,
+    defaultCrit: 1800,
+  },
+  {
+    label: 'Навантаження диска (Disk I/O)',
+    defaultUnit: 'МБ/с',
+    defaultThresholdPresetId: 'disk-io',
+    defaultWarn: 350,
+    defaultCrit: 500,
+  },
+  {
+    label: 'Мережевий трафік (Throughput)',
+    defaultUnit: 'Гбіт/с',
+    defaultThresholdPresetId: 'net-gbps',
+    defaultWarn: 7,
+    defaultCrit: 9.5,
+  },
+  {
+    label: 'Кількість помилок HTTP 5xx',
+    defaultUnit: 'помилок/с',
+    defaultThresholdPresetId: 'err-rate',
+    defaultWarn: 15,
+    defaultCrit: 40,
+  },
+  {
+    label: "Активні з'єднання БД",
+    defaultUnit: "з'єднань",
+    defaultThresholdPresetId: 'db-conn',
+    defaultWarn: 180,
+    defaultCrit: 240,
+  },
+  {
+    label: 'Навантаження сервісу',
+    defaultUnit: '%',
+    defaultThresholdPresetId: 'cpu-std',
+    defaultWarn: 75,
+    defaultCrit: 90,
+  },
+];
+
+export const STANDARD_METRIC_UNITS: string[] = [
+  '%',
+  'подій/с',
+  'мс',
+  'kIOPS',
+  'IOPS',
+  'тис. ops/s',
+  'ops/s',
+  'тис. msg',
+  'msg/s',
+  'req/s',
+  'ГБ',
+  'МБ/с',
+  'Гбіт/с',
+  'помилок/с',
+  "з'єднань",
+  'од.',
+];
+
+export const STANDARD_SECONDARY_METRICS: StandardSecondaryMetricOption[] = [
+  { label: "Активні з'єднання", defaultUnit: 'клієнтів' },
+  { label: 'Критичні FIM тригери', defaultUnit: 'алертів' },
+  { label: 'Черга тригерів Zabbix', defaultUnit: 'вузлів' },
+  { label: 'Латентність комміту', defaultUnit: 'мс' },
+  { label: "Фрагментація пам'яті", defaultUnit: '%' },
+  { label: 'Активні консьюмери', defaultUnit: 'воркерів' },
+  { label: 'Перезапуски контейнерів', defaultUnit: 'шт/год' },
+  { label: 'Час відповіді (p99)', defaultUnit: 'мс' },
+  { label: 'Вільне місце у пулі', defaultUnit: 'ТБ' },
+  { label: 'Черга вхідних пакетів', defaultUnit: 'пакетів/с' },
+  { label: 'Помилки авторизації', defaultUnit: 'подій/хв' },
+  { label: 'Реплікаційне відставання (Lag)', defaultUnit: 'мс' },
+];
+
+export const STANDARD_SECONDARY_UNITS: string[] = [
+  'клієнтів',
+  'алертів',
+  'вузлів',
+  'мс',
+  '%',
+  'воркерів',
+  'шт/год',
+  'ТБ',
+  'ГБ',
+  'пакетів/с',
+  'подій/хв',
+  'од.',
+];
+
+export const STANDARD_THRESHOLD_PRESETS: StandardThresholdPresetOption[] = [
+  { id: 'cpu-std', label: 'Стандартне навантаження (75% / 90%)', warn: 75, crit: 90 },
+  { id: 'sla-strict', label: 'Суворий SLA моніторинг (60% / 80%)', warn: 60, crit: 80 },
+  { id: 'ram-high', label: "Пам'ять / Дисковий пул (80% / 92%)", warn: 80, crit: 92 },
+  { id: 'siem-eps', label: 'Потік подій SIEM (350 / 480 подій/с)', warn: 350, crit: 480 },
+  { id: 'storage-iops', label: 'Сховище Ceph/SAN (80 / 105 kIOPS)', warn: 80, crit: 105 },
+  { id: 'cache-ops', label: 'Високонавантажений кеш (115 / 150 тис. ops/s)', warn: 115, crit: 150 },
+  { id: 'mq-queue', label: 'Черга брокера RabbitMQ (40 / 65 тис. msg)', warn: 40, crit: 65 },
+  { id: 'k8s-mem', label: 'Кластер Kubernetes (64 / 80 ГБ)', warn: 64, crit: 80 },
+  { id: 'api-latency', label: 'Латентність API (200 / 450 мс)', warn: 200, crit: 450 },
+  { id: 'http-rps', label: 'Трафік Web/API (1200 / 1800 req/s)', warn: 1200, crit: 1800 },
+  { id: 'disk-io', label: 'Дисковий ввід/вивід (350 / 500 МБ/с)', warn: 350, crit: 500 },
+  { id: 'net-gbps', label: 'Магістральний канал 10G (7 / 9.5 Гбіт/с)', warn: 7, crit: 9.5 },
+  { id: 'err-rate', label: 'Помилки HTTP 5xx (15 / 40 помилок/с)', warn: 15, crit: 40 },
+  { id: 'db-conn', label: "Пул з'єднань СУБД (180 / 240 з'єднань)", warn: 180, crit: 240 },
+];
+
+export const STANDARD_NODE_COUNTS: Array<{ value: number; label: string }> = [
+  { value: 1, label: '1 вузол (Single)' },
+  { value: 2, label: '2 вузли (HA Pair)' },
+  { value: 3, label: '3 вузли (Quorum)' },
+  { value: 4, label: '4 вузли (2x2 Grid)' },
+  { value: 6, label: '6 вузлів (Cluster)' },
+  { value: 8, label: '8 вузлів (Rack)' },
+  { value: 12, label: '12 вузлів (Pool)' },
+  { value: 16, label: '16 вузлів (NOC Grid)' },
+  { value: 24, label: '24 вузли (Enterprise)' },
+  { value: 32, label: '32 вузли (Scale)' },
+];
+
+export const STANDARD_REFRESH_INTERVALS: Array<{ value: number; label: string }> = [
+  { value: 1, label: '1 сек (Real-time)' },
+  { value: 2, label: '2 сек (Стандарт)' },
+  { value: 3, label: 'Кожні 3 сек' },
+  { value: 5, label: 'Кожні 5 сек' },
+  { value: 10, label: 'Кожні 10 сек' },
+  { value: 15, label: 'Кожні 15 сек' },
+  { value: 30, label: 'Кожні 30 сек' },
+  { value: 60, label: 'Кожні 60 сек' },
+];
+
+export interface AddServiceFormState {
+  activePresetLabel: string | null;
+  name: string;
+  serviceType: ServiceFeed['serviceType'];
+  group: string;
+  customGroup: string;
+  endpointUrl: string;
+  refreshIntervalSec: number;
+  nodesTotal: number;
+  primaryMetricLabel: string;
+  primaryMetricUnit: string;
+  secondaryMetricLabel: string;
+  secondaryMetricUnit: string;
+  thresholdPresetId: string;
+  warningThreshold: number;
+  criticalThreshold: number;
+  chartType: ChartStyleType;
+  accentColor: string;
+}
+
+/**
+ * Returns a clean, reset state for the Add Service modal so previously selected
+ * templates do not remain stuck in textboxes or parameter fields.
+ */
+export function createDefaultServiceFormState(
+  defaultGroup: string = 'Інфраструктура'
+): AddServiceFormState {
+  return {
+    activePresetLabel: null,
+    name: '',
+    serviceType: 'custom',
+    group: defaultGroup || 'Інфраструктура',
+    customGroup: '',
+    endpointUrl: '',
+    refreshIntervalSec: 2,
+    nodesTotal: 16,
+    primaryMetricLabel: 'Завантаження CPU',
+    primaryMetricUnit: '%',
+    secondaryMetricLabel: "Активні з'єднання",
+    secondaryMetricUnit: 'клієнтів',
+    thresholdPresetId: 'cpu-std',
+    warningThreshold: 75,
+    criticalThreshold: 90,
+    chartType: 'line',
+    accentColor: '#38BDF8',
+  };
+}
+
+export interface ServicePresetTemplate {
+  id: string;
+  label: string;
+  type: ServiceFeed['serviceType'];
+  group: string;
+  endpoint: string;
+  primaryLabel: string;
+  primaryUnit: string;
+  secondaryLabel: string;
+  secondaryUnit: string;
+  thresholdPresetId: string;
+  warn: number;
+  crit: number;
+  nodesTotal: number;
+  refreshSec: number;
+  chartType: ChartStyleType;
+  color: string;
+}
+
+export function createDefaultServiceTemplates(): ServicePresetTemplate[] {
+  return [
+    {
+      id: 'tpl-wazuh',
+      label: 'Wazuh SIEM',
+      type: 'wazuh',
+      group: 'Безпека (SIEM)',
+      endpoint: 'https://wazuh.internal.noc:55000/v4/events',
+      primaryLabel: 'Події безпеки (EPS)',
+      primaryUnit: 'подій/с',
+      secondaryLabel: 'Критичні FIM тригери',
+      secondaryUnit: 'алертів',
+      thresholdPresetId: 'siem-eps',
+      warn: 350,
+      crit: 480,
+      nodesTotal: 16,
+      refreshSec: 2,
+      chartType: 'line',
+      color: '#38BDF8',
+    },
+    {
+      id: 'tpl-zabbix',
+      label: 'Zabbix Server',
+      type: 'zabbix',
+      group: 'Інфраструктура',
+      endpoint: 'https://zabbix.internal.noc/api_jsonrpc.php',
+      primaryLabel: 'Завантаження CPU',
+      primaryUnit: '%',
+      secondaryLabel: 'Черга тригерів Zabbix',
+      secondaryUnit: 'вузлів',
+      thresholdPresetId: 'cpu-std',
+      warn: 75,
+      crit: 90,
+      nodesTotal: 24,
+      refreshSec: 3,
+      chartType: 'line',
+      color: '#22C55E',
+    },
+    {
+      id: 'tpl-ceph',
+      label: 'Ceph (Seph) Storage',
+      type: 'ceph',
+      group: 'Сховище даних',
+      endpoint: 'https://ceph-rgw.internal.noc:8443/api/osd',
+      primaryLabel: 'Пропускна здатність пулу',
+      primaryUnit: 'kIOPS',
+      secondaryLabel: 'Латентність комміту',
+      secondaryUnit: 'мс',
+      thresholdPresetId: 'storage-iops',
+      warn: 80,
+      crit: 105,
+      nodesTotal: 12,
+      refreshSec: 2,
+      chartType: 'bar',
+      color: '#F59E0B',
+    },
+    {
+      id: 'tpl-redis',
+      label: 'Redis Cluster',
+      type: 'redis',
+      group: 'Черги та Кеш',
+      endpoint: 'redis://redis-cluster.internal.noc:6379/info',
+      primaryLabel: 'Операцій читання/запису',
+      primaryUnit: 'тис. ops/s',
+      secondaryLabel: "Фрагментація пам'яті",
+      secondaryUnit: '%',
+      thresholdPresetId: 'cache-ops',
+      warn: 115,
+      crit: 150,
+      nodesTotal: 6,
+      refreshSec: 1,
+      chartType: 'line',
+      color: '#EC4899',
+    },
+    {
+      id: 'tpl-rabbitmq',
+      label: 'RabbitMQ Broker',
+      type: 'rabbitmq',
+      group: 'Черги та Кеш',
+      endpoint: 'https://rabbitmq.internal.noc:15672/api/queues',
+      primaryLabel: 'Непідтверджені (Unacked)',
+      primaryUnit: 'тис. msg',
+      secondaryLabel: 'Активні консьюмери',
+      secondaryUnit: 'воркерів',
+      thresholdPresetId: 'mq-queue',
+      warn: 40,
+      crit: 65,
+      nodesTotal: 4,
+      refreshSec: 2,
+      chartType: 'bar',
+      color: '#A855F7',
+    },
+    {
+      id: 'tpl-prometheus',
+      label: 'Prometheus / Kubernetes',
+      type: 'custom',
+      group: 'Контейнери (Kubernetes / Docker)',
+      endpoint: 'https://prometheus.internal.noc:9090/api/v1/query',
+      primaryLabel: "Споживання пам'яті Pod-ів",
+      primaryUnit: 'ГБ',
+      secondaryLabel: 'Перезапуски контейнерів',
+      secondaryUnit: 'шт/год',
+      thresholdPresetId: 'k8s-mem',
+      warn: 64,
+      crit: 80,
+      nodesTotal: 16,
+      refreshSec: 5,
+      chartType: 'line',
+      color: '#06B6D4',
+    },
+  ];
+}
+
+/**
+ * Pure helper to add a new template or update an existing template by ID.
+ */
+export function upsertServiceTemplate(
+  templates: ServicePresetTemplate[],
+  candidate: ServicePresetTemplate
+): ServicePresetTemplate[] {
+  const exists = templates.some((t) => t.id === candidate.id);
+  if (exists) {
+    return templates.map((t) => (t.id === candidate.id ? { ...candidate } : t));
+  }
+  return [...templates, { ...candidate }];
+}
+
+/**
+ * Pure helper to delete a template by ID.
+ */
+export function removeServiceTemplate(
+  templates: ServicePresetTemplate[],
+  templateId: string
+): ServicePresetTemplate[] {
+  return templates.filter((t) => t.id !== templateId);
+}
+
 /**
  * Creates the reference set of 5 monitoring cameras (used by unit tests or optional staging templates):
  * Wazuh SIEM, Zabbix, Ceph (Seph), Redis, and RabbitMQ.

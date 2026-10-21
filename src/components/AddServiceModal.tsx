@@ -1,9 +1,22 @@
-import React, { useState } from 'react';
-import { Plus, X } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Eraser, Plus, RotateCcw, Settings, X } from 'lucide-react';
 import {
+  createDefaultServiceFormState,
+  createDefaultServiceTemplates,
   seedInitial30sBuffer,
+  STANDARD_ENDPOINT_TEMPLATES,
+  STANDARD_METRIC_UNITS,
+  STANDARD_MONITORING_GROUPS,
+  STANDARD_NODE_COUNTS,
+  STANDARD_PRIMARY_METRICS,
+  STANDARD_REFRESH_INTERVALS,
+  STANDARD_SECONDARY_METRICS,
+  STANDARD_SECONDARY_UNITS,
+  STANDARD_SERVICE_TYPES,
+  STANDARD_THRESHOLD_PRESETS,
   type ChartStyleType,
   type ServiceFeed,
+  type ServicePresetTemplate,
 } from '../utils/monitoringEngine';
 
 interface AddServiceModalProps {
@@ -11,130 +24,153 @@ interface AddServiceModalProps {
   isDark: boolean;
   existingCount: number;
   availableGroups: string[];
+  templates?: ServicePresetTemplate[];
   onClose: () => void;
   onAddService: (newService: ServiceFeed) => void;
+  onOpenManageTemplates?: () => void;
 }
-
-const PRESET_TEMPLATES = [
-  {
-    label: 'Wazuh SIEM',
-    type: 'wazuh' as const,
-    group: 'Безпека (SIEM)',
-    endpoint: 'https://wazuh.internal.noc:55000/v4/events',
-    primaryLabel: 'Події безпеки (EPS)',
-    primaryUnit: 'подій/с',
-    secondaryLabel: 'Критичні FIM тригери',
-    secondaryUnit: 'алертів',
-    warn: 350,
-    crit: 480,
-    color: '#38BDF8',
-  },
-  {
-    label: 'Zabbix Server',
-    type: 'zabbix' as const,
-    group: 'Інфраструктура',
-    endpoint: 'https://zabbix.internal.noc/api_jsonrpc.php',
-    primaryLabel: 'Завантаження CPU',
-    primaryUnit: '%',
-    secondaryLabel: 'Черга тригерів Zabbix',
-    secondaryUnit: 'вузлів',
-    warn: 75,
-    crit: 90,
-    color: '#22C55E',
-  },
-  {
-    label: 'Ceph (Seph) Storage',
-    type: 'ceph' as const,
-    group: 'Сховище даних',
-    endpoint: 'https://ceph-rgw.internal.noc:8443/api/osd',
-    primaryLabel: 'Пропускна здатність пулу',
-    primaryUnit: 'kIOPS',
-    secondaryLabel: 'Латентність комміту',
-    secondaryUnit: 'мс',
-    warn: 80,
-    crit: 105,
-    color: '#F59E0B',
-  },
-  {
-    label: 'Redis Cluster',
-    type: 'redis' as const,
-    group: 'Черги та Кеш',
-    endpoint: 'redis://redis-cluster.internal.noc:6379/info',
-    primaryLabel: 'Операцій читання/запису',
-    primaryUnit: 'тис. ops/s',
-    secondaryLabel: "Фрагментація пам'яті",
-    secondaryUnit: '%',
-    warn: 115,
-    crit: 150,
-    color: '#EC4899',
-  },
-  {
-    label: 'RabbitMQ Broker',
-    type: 'rabbitmq' as const,
-    group: 'Черги та Кеш',
-    endpoint: 'https://rabbitmq.internal.noc:15672/api/queues',
-    primaryLabel: 'Непідтверджені (Unacked)',
-    primaryUnit: 'тис. msg',
-    secondaryLabel: 'Активні консьюмери',
-    secondaryUnit: 'воркерів',
-    warn: 40,
-    crit: 65,
-    color: '#A855F7',
-  },
-  {
-    label: 'Prometheus / Kubernetes',
-    type: 'custom' as const,
-    group: 'Інфраструктура',
-    endpoint: 'https://prometheus.internal.noc:9090/api/v1/query',
-    primaryLabel: "Споживання пам'яті Pod-ів",
-    primaryUnit: 'ГБ',
-    secondaryLabel: 'Перезапуски контейнерів',
-    secondaryUnit: 'шт/год',
-    warn: 64,
-    crit: 80,
-    color: '#06B6D4',
-  },
-];
 
 export const AddServiceModal: React.FC<AddServiceModalProps> = ({
   isOpen,
   isDark,
   existingCount,
   availableGroups,
+  templates,
   onClose,
   onAddService,
+  onOpenManageTemplates,
 }) => {
-  const [name, setName] = useState('');
-  const [serviceType, setServiceType] = useState<ServiceFeed['serviceType']>('custom');
-  const [group, setGroup] = useState(availableGroups[0] || 'Інфраструктура');
-  const [customGroup, setCustomGroup] = useState('');
-  const [endpointUrl, setEndpointUrl] = useState('https://metrics.internal.noc:9100/api/v1/status');
-  const [refreshIntervalSec, setRefreshIntervalSec] = useState(2);
-  const [primaryMetricLabel, setPrimaryMetricLabel] = useState('Навантаження сервісу');
-  const [primaryMetricUnit, setPrimaryMetricUnit] = useState('%');
-  const [secondaryMetricLabel, setSecondaryMetricLabel] = useState("Активні з'єднання");
-  const [secondaryMetricUnit, setSecondaryMetricUnit] = useState('клієнтів');
-  const [warningThreshold, setWarningThreshold] = useState(75);
-  const [criticalThreshold, setCriticalThreshold] = useState(90);
-  const [chartType, setChartType] = useState<ChartStyleType>('line');
-  const [accentColor, setAccentColor] = useState('#38BDF8');
+  const activeTemplates = useMemo(
+    () => (templates ? templates : createDefaultServiceTemplates()),
+    [templates]
+  );
+
+  const mergedGroups = useMemo(() => {
+    const templateGroups = activeTemplates.map((t) => t.group).filter(Boolean);
+    const set = new Set<string>([
+      ...STANDARD_MONITORING_GROUPS,
+      ...availableGroups,
+      ...templateGroups,
+    ]);
+    return Array.from(set);
+  }, [availableGroups, activeTemplates]);
+
+  const initialDefaults = useMemo(
+    () => createDefaultServiceFormState(mergedGroups[0] || 'Інфраструктура'),
+    [mergedGroups]
+  );
+
+  const [activePresetLabel, setActivePresetLabel] = useState<string | null>(
+    initialDefaults.activePresetLabel
+  );
+  const [name, setName] = useState(initialDefaults.name);
+  const [serviceType, setServiceType] = useState<ServiceFeed['serviceType']>(
+    initialDefaults.serviceType
+  );
+  const [group, setGroup] = useState(initialDefaults.group);
+  const [customGroup, setCustomGroup] = useState(initialDefaults.customGroup);
+  const [endpointUrl, setEndpointUrl] = useState(initialDefaults.endpointUrl);
+  const [refreshIntervalSec, setRefreshIntervalSec] = useState(initialDefaults.refreshIntervalSec);
+  const [nodesTotal, setNodesTotal] = useState(initialDefaults.nodesTotal);
+  const [primaryMetricLabel, setPrimaryMetricLabel] = useState(initialDefaults.primaryMetricLabel);
+  const [primaryMetricUnit, setPrimaryMetricUnit] = useState(initialDefaults.primaryMetricUnit);
+  const [secondaryMetricLabel, setSecondaryMetricLabel] = useState(
+    initialDefaults.secondaryMetricLabel
+  );
+  const [secondaryMetricUnit, setSecondaryMetricUnit] = useState(
+    initialDefaults.secondaryMetricUnit
+  );
+  const [thresholdPresetId, setThresholdPresetId] = useState(initialDefaults.thresholdPresetId);
+  const [warningThreshold, setWarningThreshold] = useState(initialDefaults.warningThreshold);
+  const [criticalThreshold, setCriticalThreshold] = useState(initialDefaults.criticalThreshold);
+  const [chartType, setChartType] = useState<ChartStyleType>(initialDefaults.chartType);
+  const [accentColor, setAccentColor] = useState(initialDefaults.accentColor);
   const [errorMessage, setErrorMessage] = useState('');
+
+  const handleClearForm = () => {
+    const clean = createDefaultServiceFormState(mergedGroups[0] || 'Інфраструктура');
+    setActivePresetLabel(clean.activePresetLabel);
+    setName(clean.name);
+    setServiceType(clean.serviceType);
+    setGroup(clean.group);
+    setCustomGroup(clean.customGroup);
+    setEndpointUrl(clean.endpointUrl);
+    setRefreshIntervalSec(clean.refreshIntervalSec);
+    setNodesTotal(clean.nodesTotal);
+    setPrimaryMetricLabel(clean.primaryMetricLabel);
+    setPrimaryMetricUnit(clean.primaryMetricUnit);
+    setSecondaryMetricLabel(clean.secondaryMetricLabel);
+    setSecondaryMetricUnit(clean.secondaryMetricUnit);
+    setThresholdPresetId(clean.thresholdPresetId);
+    setWarningThreshold(clean.warningThreshold);
+    setCriticalThreshold(clean.criticalThreshold);
+    setChartType(clean.chartType);
+    setAccentColor(clean.accentColor);
+    setErrorMessage('');
+  };
+
+  // Always start with a clean form whenever the modal is opened so previous templates never stick
+  useEffect(() => {
+    if (isOpen) {
+      handleClearForm();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const applyPreset = (preset: (typeof PRESET_TEMPLATES)[number]) => {
+  const applyPreset = (preset: ServicePresetTemplate) => {
+    // Clicking the already active template toggles it off and clears the form
+    if (activePresetLabel === preset.label) {
+      handleClearForm();
+      return;
+    }
+    setActivePresetLabel(preset.label);
     setName(preset.label);
     setServiceType(preset.type);
     setGroup(preset.group);
+    setCustomGroup('');
     setEndpointUrl(preset.endpoint);
+    setRefreshIntervalSec(preset.refreshSec);
+    setNodesTotal(preset.nodesTotal);
     setPrimaryMetricLabel(preset.primaryLabel);
     setPrimaryMetricUnit(preset.primaryUnit);
     setSecondaryMetricLabel(preset.secondaryLabel);
     setSecondaryMetricUnit(preset.secondaryUnit);
+    setThresholdPresetId(preset.thresholdPresetId);
     setWarningThreshold(preset.warn);
     setCriticalThreshold(preset.crit);
+    setChartType(preset.chartType);
     setAccentColor(preset.color);
     setErrorMessage('');
+  };
+
+  const handlePrimaryMetricChange = (selectedLabel: string) => {
+    setPrimaryMetricLabel(selectedLabel);
+    const found = STANDARD_PRIMARY_METRICS.find((m) => m.label === selectedLabel);
+    if (found) {
+      setPrimaryMetricUnit(found.defaultUnit);
+      setThresholdPresetId(found.defaultThresholdPresetId);
+      setWarningThreshold(found.defaultWarn);
+      setCriticalThreshold(found.defaultCrit);
+    }
+  };
+
+  const handleSecondaryMetricChange = (selectedLabel: string) => {
+    setSecondaryMetricLabel(selectedLabel);
+    const found = STANDARD_SECONDARY_METRICS.find((m) => m.label === selectedLabel);
+    if (found) {
+      setSecondaryMetricUnit(found.defaultUnit);
+    }
+  };
+
+  const handleThresholdPresetChange = (presetId: string) => {
+    setThresholdPresetId(presetId);
+    const found = STANDARD_THRESHOLD_PRESETS.find((p) => p.id === presetId);
+    if (found) {
+      setWarningThreshold(found.warn);
+      setCriticalThreshold(found.crit);
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -144,13 +180,14 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
       return;
     }
     if (!endpointUrl.trim()) {
-      setErrorMessage('Вкажіть URL ендпоінту або адресу підключення.');
+      setErrorMessage('Вкажіть URL ендпоінту або оберіть типовий URI зі списку.');
       return;
     }
 
     const finalGroup = customGroup.trim() ? customGroup.trim() : group;
     const camNum = String(existingCount + 1).padStart(2, '0');
     const now = Date.now();
+    const validNodes = Number(nodesTotal) || 16;
 
     const newService: ServiceFeed = {
       id: `srv-custom-${now}`,
@@ -162,33 +199,31 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
       refreshIntervalSec: Number(refreshIntervalSec) || 2,
       autoRefreshPage: true,
       status: 'nominal',
-      primaryMetricLabel: primaryMetricLabel.trim() || 'Основна метрика',
-      primaryMetricUnit: primaryMetricUnit.trim() || 'од.',
-      secondaryMetricLabel: secondaryMetricLabel.trim() || 'Додаткова метрика',
-      secondaryMetricUnit: secondaryMetricUnit.trim() || 'од.',
+      primaryMetricLabel: primaryMetricLabel.trim() || 'Завантаження CPU',
+      primaryMetricUnit: primaryMetricUnit.trim() || '%',
+      secondaryMetricLabel: secondaryMetricLabel.trim() || "Активні з'єднання",
+      secondaryMetricUnit: secondaryMetricUnit.trim() || 'клієнтів',
       warningThreshold: Number(warningThreshold) || 75,
-      criticalThreshold: Number(criticalThreshold) || 95,
+      criticalThreshold: Number(criticalThreshold) || 90,
       chartType,
       chartFill: true,
       chartSmooth: true,
       accentColor,
-      nodesOnline: 16,
-      nodesTotal: 16,
+      nodesOnline: validNodes,
+      nodesTotal: validNodes,
       lastUpdated: new Date(now).toISOString(),
       ringBuffer30s: seedInitial30sBuffer(
         Number((warningThreshold * 0.6).toFixed(1)),
         24,
         14,
         Number(warningThreshold) || 75,
-        Number(criticalThreshold) || 95,
+        Number(criticalThreshold) || 90,
         now
       ),
     };
 
     onAddService(newService);
-    setName('');
-    setCustomGroup('');
-    setErrorMessage('');
+    handleClearForm();
     onClose();
   };
 
@@ -212,7 +247,7 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 overflow-y-auto"
     >
       <div
-        className={`w-full max-w-2xl rounded-xl border p-6 shadow-2xl ${
+        className={`w-full max-w-3xl rounded-xl border p-6 shadow-2xl my-auto ${
           isDark ? 'bg-[#111827] border-slate-700 text-slate-100' : 'bg-white border-slate-200 text-slate-900'
         }`}
       >
@@ -226,12 +261,15 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
               Підключити робочий сервіс на стіну моніторингу
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              Вкажіть параметри вашого дашборду або оберіть шаблон (Wazuh SIEM, Zabbix, Ceph/Seph, Redis, RabbitMQ) для швидкого заповнення метрик
+              Оберіть стандартизовані параметри з випадаючих списків або застосуйте готовий шаблон сервісу
             </p>
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={() => {
+              handleClearForm();
+              onClose();
+            }}
             aria-label="Закрити вікно додавання сервісу"
             className={`p-2 rounded-lg transition-colors ${
               isDark
@@ -243,27 +281,73 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
           </button>
         </div>
 
-        {/* Quick Templates */}
+        {/* Quick Templates + Clear & Manage Templates Buttons */}
         <div className="mt-4">
-          <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-2">
-            Швидкі шаблони конфігурації метрик:
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {PRESET_TEMPLATES.map((preset) => (
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Швидкі шаблони конфігурації метрик ({activeTemplates.length}):
+            </span>
+            <div className="flex items-center gap-2">
+              {onOpenManageTemplates && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleClearForm();
+                    onClose();
+                    onOpenManageTemplates();
+                  }}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md border transition-colors flex items-center gap-1.5 ${
+                    isDark
+                      ? 'border-sky-500/40 bg-sky-950/30 text-sky-300 hover:bg-sky-900/40'
+                      : 'border-sky-300 bg-sky-50 text-sky-700 hover:bg-sky-100'
+                  }`}
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                  <span>Керувати шаблонами</span>
+                </button>
+              )}
               <button
-                key={preset.label}
                 type="button"
-                onClick={() => applyPreset(preset)}
-                className={`px-2.5 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap ${
+                onClick={handleClearForm}
+                className={`px-2.5 py-1 text-xs font-medium rounded-md border transition-colors flex items-center gap-1.5 ${
                   isDark
-                    ? 'border-slate-700 bg-slate-900/90 text-slate-200 hover:border-sky-500/60 hover:text-sky-300'
-                    : 'border-slate-300 bg-slate-100 text-slate-800 hover:border-sky-500 hover:text-sky-700'
+                    ? 'border-slate-700 bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white'
+                    : 'border-slate-300 bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-900'
                 }`}
+                title="Очистити всі текстові поля та скинути вибраний шаблон"
               >
-                + {preset.label}
+                <Eraser className="w-3.5 h-3.5" />
+                <span>Скинути шаблон</span>
               </button>
-            ))}
+            </div>
           </div>
+          {activeTemplates.length === 0 ? (
+            <div className="text-xs text-slate-500 dark:text-slate-400 italic py-1">
+              Список шаблонів порожній. Ви можете створити власні шаблони у вкладці «Налаштування та Сповіщення».
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {activeTemplates.map((preset) => {
+                const isSelected = activePresetLabel === preset.label;
+                return (
+                  <button
+                    key={preset.id || preset.label}
+                    type="button"
+                    onClick={() => applyPreset(preset)}
+                    className={`px-2.5 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap ${
+                      isSelected
+                        ? 'border-sky-500 bg-sky-500/20 text-sky-400 font-semibold'
+                        : isDark
+                        ? 'border-slate-700 bg-slate-900/90 text-slate-200 hover:border-sky-500/60 hover:text-sky-300'
+                        : 'border-slate-300 bg-slate-100 text-slate-800 hover:border-sky-500 hover:text-sky-700'
+                    }`}
+                  >
+                    + {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         <form onSubmit={handleSubmit} className="mt-5 space-y-4">
@@ -273,6 +357,7 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
             </div>
           )}
 
+          {/* Row 1: Service Name & Standardized Connector Type */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label
@@ -285,10 +370,69 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
                 id="srv-name"
                 type="text"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  setActivePresetLabel(null);
+                }}
                 placeholder="Напр.: Wazuh SIEM або Ceph Storage"
                 className={inputClass}
               />
+            </div>
+
+            <div>
+              <label
+                htmlFor="srv-type"
+                className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
+              >
+                Тип платформи / Конектора (стандарт)
+              </label>
+              <select
+                id="srv-type"
+                value={serviceType}
+                onChange={(e) =>
+                  setServiceType(e.target.value as ServiceFeed['serviceType'])
+                }
+                className={inputClass}
+              >
+                {STANDARD_SERVICE_TYPES.map((st) => (
+                  <option key={st.value} value={st.value}>
+                    {st.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Row 2: Standardized Endpoint Selector + Endpoint URL Input */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label
+                htmlFor="srv-endpoint-preset"
+                className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
+              >
+                Типовий URI / Шаблон ендпоінту (зі списку)
+              </label>
+              <select
+                id="srv-endpoint-preset"
+                value={
+                  STANDARD_ENDPOINT_TEMPLATES.some((t) => t.url === endpointUrl)
+                    ? endpointUrl
+                    : ''
+                }
+                onChange={(e) => {
+                  if (e.target.value) {
+                    setEndpointUrl(e.target.value);
+                  }
+                }}
+                className={inputClass}
+              >
+                <option value="">— Обрати стандартний URI підключення —</option>
+                {STANDARD_ENDPOINT_TEMPLATES.map((tpl) => (
+                  <option key={tpl.url} value={tpl.url}>
+                    {tpl.label}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div>
@@ -309,7 +453,8 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {/* Row 3: Monitoring Group, Custom Group, Refresh Interval, Nodes Count */}
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <div>
               <label
                 htmlFor="srv-group"
@@ -321,9 +466,9 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
                 id="srv-group"
                 value={group}
                 onChange={(e) => setGroup(e.target.value)}
-                className={inputClass}
+                className={smallInputClass}
               >
-                {availableGroups.map((g) => (
+                {mergedGroups.map((g) => (
                   <option key={g} value={g}>
                     {g}
                   </option>
@@ -336,15 +481,15 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
                 htmlFor="srv-custom-group"
                 className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
               >
-                Або нова група (необов'язково)
+                Власна група (опціонально)
               </label>
               <input
                 id="srv-custom-group"
                 type="text"
                 value={customGroup}
                 onChange={(e) => setCustomGroup(e.target.value)}
-                placeholder="Напр.: Хмарні БД"
-                className={inputClass}
+                placeholder="Напр.: Прод-кластер"
+                className={smallInputClass}
               />
             </div>
 
@@ -353,61 +498,160 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
                 htmlFor="srv-refresh"
                 className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
               >
-                Період оновлення даних (сек)
+                Період опитування
               </label>
               <select
                 id="srv-refresh"
                 value={refreshIntervalSec}
                 onChange={(e) => setRefreshIntervalSec(Number(e.target.value))}
-                className={`${inputClass} font-mono`}
+                className={`${smallInputClass} font-mono`}
               >
-                <option value={1}>Кожну 1 секунду</option>
-                <option value={2}>Кожні 2 секунди</option>
-                <option value={3}>Кожні 3 секунди</option>
-                <option value={5}>Кожні 5 секунд</option>
-                <option value={10}>Кожні 10 секунд</option>
-                <option value={30}>Кожні 30 секунд</option>
+                {STANDARD_REFRESH_INTERVALS.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label
+                htmlFor="srv-nodes"
+                className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
+              >
+                Кількість вузлів кластера
+              </label>
+              <select
+                id="srv-nodes"
+                value={nodesTotal}
+                onChange={(e) => setNodesTotal(Number(e.target.value))}
+                className={`${smallInputClass} font-mono`}
+              >
+                {STANDARD_NODE_COUNTS.map((nodeOpt) => (
+                  <option key={nodeOpt.value} value={nodeOpt.value}>
+                    {nodeOpt.label}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {/* Row 4: Standardized Primary & Secondary Metrics and Units (Dropdowns) */}
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <div>
               <label
                 htmlFor="srv-metric-label"
                 className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
               >
-                Основна метрика
+                Основна метрика (стандарт)
               </label>
-              <input
+              <select
                 id="srv-metric-label"
-                type="text"
                 value={primaryMetricLabel}
-                onChange={(e) => setPrimaryMetricLabel(e.target.value)}
+                onChange={(e) => handlePrimaryMetricChange(e.target.value)}
                 className={smallInputClass}
-              />
+              >
+                {STANDARD_PRIMARY_METRICS.map((m) => (
+                  <option key={m.label} value={m.label}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
             </div>
+
             <div>
               <label
                 htmlFor="srv-metric-unit"
                 className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
               >
-                Одиниця виміру
+                Одиниця виміру (основна)
               </label>
-              <input
+              <select
                 id="srv-metric-unit"
-                type="text"
                 value={primaryMetricUnit}
                 onChange={(e) => setPrimaryMetricUnit(e.target.value)}
                 className={`${smallInputClass} font-mono`}
-              />
+              >
+                {STANDARD_METRIC_UNITS.map((u) => (
+                  <option key={u} value={u}>
+                    {u}
+                  </option>
+                ))}
+              </select>
             </div>
+
+            <div>
+              <label
+                htmlFor="srv-sec-metric-label"
+                className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
+              >
+                Додаткова метрика (стандарт)
+              </label>
+              <select
+                id="srv-sec-metric-label"
+                value={secondaryMetricLabel}
+                onChange={(e) => handleSecondaryMetricChange(e.target.value)}
+                className={smallInputClass}
+              >
+                {STANDARD_SECONDARY_METRICS.map((m) => (
+                  <option key={m.label} value={m.label}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label
+                htmlFor="srv-sec-metric-unit"
+                className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
+              >
+                Одиниця виміру (додаткова)
+              </label>
+              <select
+                id="srv-sec-metric-unit"
+                value={secondaryMetricUnit}
+                onChange={(e) => setSecondaryMetricUnit(e.target.value)}
+                className={`${smallInputClass} font-mono`}
+              >
+                {STANDARD_SECONDARY_UNITS.map((u) => (
+                  <option key={u} value={u}>
+                    {u}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Row 5: Standardized Threshold Profile + Warning/Critical Numeric Overrides */}
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <div className="sm:col-span-2">
+              <label
+                htmlFor="srv-threshold-preset"
+                className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
+              >
+                Профіль порогів реагування (УВАГА / ЗБІЙ)
+              </label>
+              <select
+                id="srv-threshold-preset"
+                value={thresholdPresetId}
+                onChange={(e) => handleThresholdPresetChange(e.target.value)}
+                className={smallInputClass}
+              >
+                {STANDARD_THRESHOLD_PRESETS.map((tp) => (
+                  <option key={tp.id} value={tp.id}>
+                    {tp.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div>
               <label
                 htmlFor="srv-warn"
                 className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
               >
-                Поріг УВАГА
+                Поріг УВАГА ({primaryMetricUnit})
               </label>
               <input
                 id="srv-warn"
@@ -417,12 +661,13 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
                 className={`${smallInputClass} font-mono`}
               />
             </div>
+
             <div>
               <label
                 htmlFor="srv-crit"
                 className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1"
               >
-                Поріг ЗБІЙ (Дамп 30с)
+                Поріг ЗБІЙ 30с ({primaryMetricUnit})
               </label>
               <input
                 id="srv-crit"
@@ -434,6 +679,7 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
             </div>
           </div>
 
+          {/* Row 6: Chart Visualization & Accent Color */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label
@@ -462,7 +708,7 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
               >
                 Колір лінії телеметрії
               </label>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 pt-1">
                 {['#38BDF8', '#22C55E', '#F59E0B', '#EC4899', '#A855F7', '#06B6D4'].map((c) => (
                   <button
                     key={c}
@@ -479,29 +725,48 @@ export const AddServiceModal: React.FC<AddServiceModalProps> = ({
             </div>
           </div>
 
+          {/* Modal Footer with Clear ("Очистити"), Cancel, and Submit */}
           <div
-            className={`flex items-center justify-end gap-3 pt-4 border-t ${
+            className={`flex flex-wrap items-center justify-between gap-3 pt-4 border-t ${
               isDark ? 'border-slate-800' : 'border-slate-200'
             }`}
           >
             <button
               type="button"
-              onClick={onClose}
-              className={`px-4 py-2 text-xs font-medium rounded-lg border transition-colors ${
+              onClick={handleClearForm}
+              className={`px-3.5 py-2 text-xs font-medium rounded-lg border transition-colors flex items-center gap-1.5 ${
                 isDark
-                  ? 'border-slate-700 text-slate-300 hover:bg-slate-800'
-                  : 'border-slate-300 text-slate-700 hover:bg-slate-100'
+                  ? 'border-slate-700 bg-slate-800/70 text-slate-300 hover:bg-slate-800 hover:text-white'
+                  : 'border-slate-300 bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-900'
               }`}
             >
-              Скасувати
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Очистити</span>
             </button>
-            <button
-              type="submit"
-              className="px-4 py-2 text-xs font-semibold rounded-lg bg-sky-500 text-slate-950 hover:bg-sky-400 transition-colors flex items-center gap-1.5"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Підключити сервіс на екран</span>
-            </button>
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  handleClearForm();
+                  onClose();
+                }}
+                className={`px-4 py-2 text-xs font-medium rounded-lg border transition-colors ${
+                  isDark
+                    ? 'border-slate-700 text-slate-300 hover:bg-slate-800'
+                    : 'border-slate-300 text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                Скасувати
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 text-xs font-semibold rounded-lg bg-sky-500 text-slate-950 hover:bg-sky-400 transition-colors flex items-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Підключити сервіс на екран</span>
+              </button>
+            </div>
           </div>
         </form>
       </div>

@@ -4,11 +4,18 @@ import {
   appendToRingBuffer,
   captureCrashBlackbox,
   createBackupSnapshot,
+  createDefaultServiceFormState,
   createInitialServices,
   filterQueryLogs,
   formatDeleteDashboardPrompt,
   formatMetricsToCSV,
   generateNextTelemetrySample,
+  STANDARD_ENDPOINT_TEMPLATES,
+  STANDARD_METRIC_UNITS,
+  STANDARD_MONITORING_GROUPS,
+  STANDARD_PRIMARY_METRICS,
+  STANDARD_SECONDARY_METRICS,
+  STANDARD_THRESHOLD_PRESETS,
   type CloudQueryLog,
 } from './monitoringEngine.ts';
 
@@ -149,3 +156,65 @@ test('formatDeleteDashboardPrompt produces simplified confirmation question', ()
     'Чи хочете ви видалити Zabbix дашборд?'
   );
 });
+
+test('createDefaultServiceFormState returns clean textboxes and valid standardized defaults', () => {
+  const clean = createDefaultServiceFormState('Безпека (SIEM)');
+  assert.equal(clean.activePresetLabel, null);
+  assert.equal(clean.name, '');
+  assert.equal(clean.endpointUrl, '');
+  assert.equal(clean.customGroup, '');
+  assert.equal(clean.group, 'Безпека (SIEM)');
+  assert.equal(clean.primaryMetricLabel, 'Завантаження CPU');
+  assert.equal(clean.primaryMetricUnit, '%');
+  assert.equal(clean.warningThreshold, 75);
+  assert.equal(clean.criticalThreshold, 90);
+
+  assert.ok(STANDARD_MONITORING_GROUPS.length >= 9);
+  assert.ok(STANDARD_ENDPOINT_TEMPLATES.length >= 10);
+  assert.ok(STANDARD_PRIMARY_METRICS.length >= 12);
+  assert.ok(STANDARD_METRIC_UNITS.length >= 12);
+  assert.ok(STANDARD_SECONDARY_METRICS.length >= 10);
+  assert.ok(STANDARD_THRESHOLD_PRESETS.length >= 12);
+});
+
+test('createDefaultServiceTemplates, upsertServiceTemplate, and removeServiceTemplate support full template CRUD', async () => {
+  const {
+    createDefaultServiceTemplates,
+    upsertServiceTemplate,
+    removeServiceTemplate,
+  } = await import('./monitoringEngine.ts');
+
+  const initial = createDefaultServiceTemplates();
+  assert.equal(initial.length, 6);
+  assert.equal(initial[0].label, 'Wazuh SIEM');
+
+  // Edit existing standard template
+  const editedWazuh = {
+    ...initial[0],
+    label: 'Wazuh SIEM Prod Cluster',
+    warn: 420,
+    crit: 550,
+  };
+  const afterEdit = upsertServiceTemplate(initial, editedWazuh);
+  assert.equal(afterEdit.length, 6);
+  assert.equal(afterEdit[0].label, 'Wazuh SIEM Prod Cluster');
+  assert.equal(afterEdit[0].warn, 420);
+
+  // Create new custom template
+  const newTemplate = {
+    ...initial[0],
+    id: 'tpl-postgres-1',
+    label: 'PostgreSQL HA Cluster',
+    group: 'Бази даних (SQL / NoSQL)',
+    endpoint: 'https://postgres.internal.noc:9187/metrics',
+  };
+  const afterCreate = upsertServiceTemplate(afterEdit, newTemplate);
+  assert.equal(afterCreate.length, 7);
+  assert.equal(afterCreate[6].label, 'PostgreSQL HA Cluster');
+
+  // Delete a template
+  const afterDelete = removeServiceTemplate(afterCreate, 'tpl-zabbix');
+  assert.equal(afterDelete.length, 6);
+  assert.ok(!afterDelete.some((t) => t.id === 'tpl-zabbix'));
+});
+

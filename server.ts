@@ -19,6 +19,7 @@ interface CloudStoreData {
   customWidgets: unknown[];
   notificationHistory: unknown[];
   notificationConfig?: Record<string, unknown>;
+  serviceTemplates?: unknown[];
 }
 
 function createEmptyStore(): CloudStoreData {
@@ -54,6 +55,9 @@ function ensureCloudStore(): CloudStoreData {
       customWidgets: Array.isArray(parsed.customWidgets) ? parsed.customWidgets : [],
       notificationHistory: Array.isArray(parsed.notificationHistory) ? parsed.notificationHistory : [],
       notificationConfig: parsed.notificationConfig,
+      serviceTemplates: Array.isArray(parsed.serviceTemplates)
+        ? parsed.serviceTemplates
+        : undefined,
     };
   } catch {
     return createEmptyStore();
@@ -96,6 +100,7 @@ async function startServer() {
       customWidgets,
       notificationHistory,
       notificationConfig,
+      serviceTemplates,
     } = req.body || {};
 
     const updated: CloudStoreData = {
@@ -114,6 +119,9 @@ async function startServer() {
         notificationConfig && typeof notificationConfig === 'object'
           ? notificationConfig
           : current.notificationConfig,
+      serviceTemplates: Array.isArray(serviceTemplates)
+        ? serviceTemplates
+        : current.serviceTemplates,
     };
 
     saveCloudStore(updated);

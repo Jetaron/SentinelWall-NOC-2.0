@@ -18,8 +18,11 @@ import {
   appendToRingBuffer,
   captureCrashBlackbox,
   createBackupSnapshot,
+  createDefaultServiceTemplates,
   formatDeleteDashboardPrompt,
   generateNextTelemetrySample,
+  removeServiceTemplate,
+  upsertServiceTemplate,
   type CloudBackupSnapshot,
   type CloudQueryLog,
   type CrashBlackboxReport,
@@ -27,6 +30,7 @@ import {
   type NotificationConfig,
   type NotificationRecord,
   type ServiceFeed,
+  type ServicePresetTemplate,
 } from './utils/monitoringEngine';
 import { downloadCsvReport, downloadPdfReport } from './utils/reportExporter';
 import { CctvCameraTile } from './components/CctvCameraTile';
@@ -88,6 +92,9 @@ export default function App() {
     CLEAN_NOTIFICATION_CONFIG
   );
   const [notificationHistory, setNotificationHistory] = useState<NotificationRecord[]>([]);
+  const [serviceTemplates, setServiceTemplates] = useState<ServicePresetTemplate[]>(() =>
+    createDefaultServiceTemplates()
+  );
 
   const [cloudLastSynced, setCloudLastSynced] = useState<string>(
     new Date(initialNow).toISOString()
@@ -144,6 +151,9 @@ export default function App() {
         if (store.notificationConfig && typeof store.notificationConfig === 'object') {
           setNotificationConfig((prev) => ({ ...prev, ...store.notificationConfig }));
         }
+        if (Array.isArray(store.serviceTemplates)) {
+          setServiceTemplates(store.serviceTemplates);
+        }
         if (payload.updatedAt) {
           setCloudLastSynced(payload.updatedAt);
         }
@@ -161,7 +171,8 @@ export default function App() {
     nextBlackboxes: CrashBlackboxReport[],
     nextWidgets: CustomDashboardWidget[],
     nextNotifications: NotificationRecord[],
-    nextConfig: NotificationConfig = notificationConfig
+    nextConfig: NotificationConfig = notificationConfig,
+    nextTemplates: ServicePresetTemplate[] = serviceTemplates
   ) => {
     try {
       const res = await fetch('/api/cloud/sync', {
@@ -175,6 +186,7 @@ export default function App() {
           customWidgets: nextWidgets,
           notificationHistory: nextNotifications.slice(0, 50),
           notificationConfig: nextConfig,
+          serviceTemplates: nextTemplates,
         }),
       });
       if (res.ok) {
@@ -617,8 +629,67 @@ export default function App() {
       setWallSearch('');
       setStatusBanner('Усі дані середовища очищено.');
       setTimeout(() => setStatusBanner(null), 4000);
-      syncToCloud([], [], [], [], [], [], CLEAN_NOTIFICATION_CONFIG);
+      syncToCloud([], [], [], [], [], [], CLEAN_NOTIFICATION_CONFIG, serviceTemplates);
     }
+  };
+
+  const handleSaveTemplate = (template: ServicePresetTemplate) => {
+    const isExisting = serviceTemplates.some((t) => t.id === template.id);
+    const nextTemplates = upsertServiceTemplate(serviceTemplates, template);
+    setServiceTemplates(nextTemplates);
+    setStatusBanner(
+      isExisting
+        ? `Шаблон «${template.label}» успішно оновлено.`
+        : `Новий шаблон «${template.label}» додано до списку швидкого підключення.`
+    );
+    setTimeout(() => setStatusBanner(null), 4000);
+    syncToCloud(
+      services,
+      logs,
+      backups,
+      blackboxReports,
+      customWidgets,
+      notificationHistory,
+      notificationConfig,
+      nextTemplates
+    );
+  };
+
+  const handleDeleteTemplate = (templateId: string) => {
+    const target = serviceTemplates.find((t) => t.id === templateId);
+    const nextTemplates = removeServiceTemplate(serviceTemplates, templateId);
+    setServiceTemplates(nextTemplates);
+    if (target) {
+      setStatusBanner(`Шаблон «${target.label}» видалено зі списку.`);
+      setTimeout(() => setStatusBanner(null), 4000);
+    }
+    syncToCloud(
+      services,
+      logs,
+      backups,
+      blackboxReports,
+      customWidgets,
+      notificationHistory,
+      notificationConfig,
+      nextTemplates
+    );
+  };
+
+  const handleResetDefaultTemplates = () => {
+    const defaults = createDefaultServiceTemplates();
+    setServiceTemplates(defaults);
+    setStatusBanner('Відновлено стандартний набір шаблонів швидкого підключення.');
+    setTimeout(() => setStatusBanner(null), 4000);
+    syncToCloud(
+      services,
+      logs,
+      backups,
+      blackboxReports,
+      customWidgets,
+      notificationHistory,
+      notificationConfig,
+      defaults
+    );
   };
 
   const handleCreateManualBackup = (label: string) => {
@@ -1420,6 +1491,7 @@ export default function App() {
         {activeTab === 'notifications' && (
           <NotificationsAndExportView
             services={services}
+            templates={serviceTemplates}
             config={notificationConfig}
             history={notificationHistory}
             isDark={isDark}
@@ -1434,9 +1506,13 @@ export default function App() {
                 blackboxReports,
                 customWidgets,
                 notificationHistory,
-                nextConfig
+                nextConfig,
+                serviceTemplates
               );
             }}
+            onSaveTemplate={handleSaveTemplate}
+            onDeleteTemplate={handleDeleteTemplate}
+            onResetDefaultTemplates={handleResetDefaultTemplates}
             onSimulateCrash={handleSimulateCrash}
             onRecoverService={handleRecoverService}
             onOpenAddService={() => setIsAddModalOpen(true)}
@@ -1477,8 +1553,10 @@ export default function App() {
         isDark={isDark}
         existingCount={services.length}
         availableGroups={availableGroups}
+        templates={serviceTemplates}
         onClose={() => setIsAddModalOpen(false)}
         onAddService={handleAddService}
+        onOpenManageTemplates={() => setActiveTab('notifications')}
       />
 
       <ExpandedCameraModal
