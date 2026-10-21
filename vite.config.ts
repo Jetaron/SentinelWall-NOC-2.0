@@ -1,22 +1,58 @@
-import tailwindcss from '@tailwindcss/vite';
-import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import { defineConfig, loadEnv } from 'vite';
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
-export default defineConfig(() => {
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, '.', '');
+
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    define: {
+      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+    },
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modify—file watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      port: 3000,
+      host: true,
+    },
+    build: {
+      chunkSizeWarningLimit: 800,
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              {
+                name: 'vendor-charts',
+                test: /node_modules[\\/](chart\.js|react-chartjs-2)/,
+              },
+              {
+                name: 'vendor-pdf',
+                test: /node_modules[\\/](jspdf|html2canvas|canvg)/,
+              },
+              {
+                name: 'vendor-motion',
+                test: /node_modules[\\/](motion|framer-motion)/,
+              },
+              {
+                name: 'vendor-icons',
+                test: /node_modules[\\/]lucide-react/,
+              },
+              {
+                name: 'vendor-core',
+                test: /node_modules[\\/](react|react-dom|scheduler)/,
+              },
+            ],
+          },
+        },
+      },
     },
   };
 });
