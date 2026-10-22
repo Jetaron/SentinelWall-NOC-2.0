@@ -190,4 +190,4 @@ docker compose up -d --build
 
 ## Ліцензування
 
-**Omega Development 2026 All right reserved**
+**Kharchenko Yakiv 2026 All right reserved**
