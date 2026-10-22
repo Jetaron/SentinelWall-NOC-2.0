@@ -1,5 +1,6 @@
 import express from 'express';
 import fs from 'fs';
+import net from 'net';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
@@ -20,6 +21,117 @@ interface CloudStoreData {
   notificationHistory: unknown[];
   notificationConfig?: Record<string, unknown>;
   serviceTemplates?: unknown[];
+}
+
+export interface LiveProbeResult {
+  online: boolean;
+  latencyMs: number;
+  isDemoHost: boolean;
+  host: string;
+  port: number;
+  checkedAt: number;
+  error?: string;
+}
+
+const liveProbeCache: Record<string, LiveProbeResult> = {};
+
+function parseEndpointTarget(rawEndpoint: string): { host: string; port: number; isDemoHost: boolean } {
+  const cleaned = (rawEndpoint || '').trim();
+  if (!cleaned) {
+    return { host: '127.0.0.1', port: 0, isDemoHost: false };
+  }
+
+  // Якщо ввели просто номер порту, наприклад "1111" або ":1111"
+  if (/^:?\d{1,5}$/.test(cleaned)) {
+    return {
+      host: '127.0.0.1',
+      port: parseInt(cleaned.replace(':', ''), 10),
+      isDemoHost: false,
+    };
+  }
+
+  try {
+    const withProtocol = cleaned.includes('://') ? cleaned : `http://${cleaned}`;
+    const parsed = new URL(withProtocol);
+    const host = parsed.hostname || '127.0.0.1';
+    const isDemoHost = host.endsWith('.internal.noc') || host.endsWith('.demo.noc');
+    let port = parsed.port ? parseInt(parsed.port, 10) : 0;
+
+    if (!port) {
+      if (parsed.protocol === 'https:') port = 443;
+      else if (parsed.protocol === 'redis:') port = 6379;
+      else port = 80;
+    }
+
+    return { host, port, isDemoHost };
+  } catch {
+    const match = cleaned.match(/^([^:/]+):(\d{1,5})/);
+    if (match) {
+      const host = match[1];
+      return {
+        host,
+        port: parseInt(match[2], 10),
+        isDemoHost: host.endsWith('.internal.noc'),
+      };
+    }
+    return { host: '127.0.0.1', port: 0, isDemoHost: false };
+  }
+}
+
+function checkTcpTarget(rawEndpoint: string, timeoutMs = 1200): Promise<LiveProbeResult> {
+  const { host, port, isDemoHost } = parseEndpointTarget(rawEndpoint);
+
+  if (isDemoHost) {
+    return Promise.resolve({
+      online: true,
+      latencyMs: 12,
+      isDemoHost: true,
+      host,
+      port,
+      checkedAt: Date.now(),
+    });
+  }
+
+  if (!port || isNaN(port) || port < 1 || port > 65535) {
+    return Promise.resolve({
+      online: false,
+      latencyMs: 0,
+      isDemoHost: false,
+      host,
+      port: port || 0,
+      checkedAt: Date.now(),
+      error: 'Invalid port',
+    });
+  }
+
+  return new Promise((resolve) => {
+    const start = performance.now();
+    const socket = new net.Socket();
+    let settled = false;
+
+    const finish = (online: boolean, error?: string) => {
+      if (settled) return;
+      settled = true;
+      const latencyMs = online ? Math.max(1, Math.round(performance.now() - start)) : 0;
+      socket.destroy();
+      resolve({
+        online,
+        latencyMs,
+        isDemoHost: false,
+        host,
+        port,
+        checkedAt: Date.now(),
+        error,
+      });
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false, 'TIMEOUT'));
+    socket.once('error', (err) => finish(false, err.message));
+
+    socket.connect(port, host);
+  });
 }
 
 function createEmptyStore(): CloudStoreData {
@@ -72,13 +184,52 @@ function saveCloudStore(data: CloudStoreData): void {
   fs.writeFileSync(CLOUD_STORE_PATH, JSON.stringify(data, null, 2), 'utf-8');
 }
 
+async function refreshAllServiceProbes() {
+  const store = ensureCloudStore();
+  const services = Array.isArray(store.services) ? (store.services as any[]) : [];
+  await Promise.all(
+    services.map(async (srv) => {
+      if (srv && srv.endpointUrl) {
+        const res = await checkTcpTarget(String(srv.endpointUrl));
+        liveProbeCache[String(srv.endpointUrl)] = res;
+      }
+    })
+  );
+}
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: '10mb' }));
 
-  // Health & Cloud Sync status endpoint
+  // Фонове опитування реальних портів кожні 2 секунди
+  setInterval(() => {
+    refreshAllServiceProbes().catch(() => {});
+  }, 2000);
+
+  // Ендпоінт для отримання живих статусів портів фронтендом
+  app.post('/api/probes/check', async (req, res) => {
+    const endpoints: string[] = Array.isArray(req.body?.endpoints) ? req.body.endpoints : [];
+    const results: Record<string, LiveProbeResult> = {};
+
+    await Promise.all(
+      endpoints.map(async (ep) => {
+        const key = String(ep || '').trim();
+        if (!key) return;
+        const probe = await checkTcpTarget(key);
+        liveProbeCache[key] = probe;
+        results[key] = probe;
+      })
+    );
+
+    res.json({ probes: results });
+  });
+
+  app.get('/api/probes/status', (_req, res) => {
+    res.json({ probes: liveProbeCache });
+  });
+
   app.get('/api/cloud/state', (_req, res) => {
     const store = ensureCloudStore();
     res.json({
@@ -86,11 +237,11 @@ async function startServer() {
       cloudProvider: 'SentinelCloud Object Store (S3-Compatible)',
       updatedAt: store.updatedAt,
       data: store,
+      probes: liveProbeCache,
     });
   });
 
-  // Sync services, logs, backups, blackbox dumps, and custom widgets to Cloud Storage
-  app.post('/api/cloud/sync', (req, res) => {
+  app.post('/api/cloud/sync', async (req, res) => {
     const current = ensureCloudStore();
     const {
       services,
@@ -125,9 +276,12 @@ async function startServer() {
     };
 
     saveCloudStore(updated);
+    await refreshAllServiceProbes();
+
     res.json({
       status: 'synced',
       updatedAt: updated.updatedAt,
+      probes: liveProbeCache,
       counts: {
         services: updated.services.length,
         logs: updated.logs.length,
@@ -137,7 +291,6 @@ async function startServer() {
     });
   });
 
-  // Create a dedicated Cloud Backup Snapshot
   app.post('/api/cloud/backups', (req, res) => {
     const current = ensureCloudStore();
     const snapshot = req.body;
@@ -153,7 +306,6 @@ async function startServer() {
     res.json({ status: 'backup_saved', backupId: snapshot.id, updatedAt: current.updatedAt });
   });
 
-  // Dispatch notification to Telegram or Slack
   app.post('/api/notify/send', async (req, res) => {
     const {
       channelType,

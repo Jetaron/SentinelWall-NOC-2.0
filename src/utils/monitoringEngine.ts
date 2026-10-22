@@ -73,7 +73,13 @@ export interface CloudQueryLog {
   serviceId: string;
   serviceName: string;
   group: string;
-  queryType: 'POLL_METRICS' | 'ALERT_WEBHOOK' | 'CRASH_DUMP_30S' | 'BACKUP_SNAPSHOT' | 'RESTORE_STATE' | 'CONFIG_CHANGE';
+  queryType:
+    | 'POLL_METRICS'
+    | 'ALERT_WEBHOOK'
+    | 'CRASH_DUMP_30S'
+    | 'BACKUP_SNAPSHOT'
+    | 'RESTORE_STATE'
+    | 'CONFIG_CHANGE';
   queryEndpoint: string;
   status: ServiceStatus;
   latencyMs: number;
@@ -144,6 +150,48 @@ export interface LogFilterCriteria {
 
 export const DEFAULT_RING_BUFFER_SIZE = 30;
 
+// Кеш реальних перевірок портів із бекенду Express
+const clientProbeCache: Record<
+  string,
+  {
+    online: boolean;
+    latencyMs: number;
+    isDemoHost: boolean;
+    host: string;
+    port: number;
+    error?: string;
+  }
+> = {};
+let lastProbePollMs = 0;
+
+function isDemoEndpoint(endpointUrl: string): boolean {
+  const cleaned = (endpointUrl || '').trim().toLowerCase();
+  return cleaned.includes('.internal.noc') || cleaned.includes('.demo.noc');
+}
+
+function triggerBackgroundProbePoll(endpointUrl: string): void {
+  if (typeof window === 'undefined') return;
+  const key = (endpointUrl || '').trim();
+  if (!key || isDemoEndpoint(key)) return;
+
+  const now = Date.now();
+  if (now - lastProbePollMs < 1000 && clientProbeCache[key]) return;
+  lastProbePollMs = now;
+
+  fetch('/api/probes/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoints: [key] }),
+  })
+    .then((r) => r.json())
+    .then((data) => {
+      if (data?.probes) {
+        Object.assign(clientProbeCache, data.probes);
+      }
+    })
+    .catch(() => {});
+}
+
 /**
  * Appends a new metric sample to the service's 30-second rolling buffer,
  * keeping at most `maxSamples` (default 30 seconds) and recalculating `relativeSec`.
@@ -155,7 +203,6 @@ export function appendToRingBuffer(
 ): MetricSample[] {
   const combined = [...buffer, newSample];
   const sliced = combined.slice(Math.max(0, combined.length - maxSamples));
-  const latestEpoch = sliced[sliced.length - 1]?.epochMs ?? newSample.epochMs;
 
   return sliced.map((sample, idx) => {
     const rawRel = -(sliced.length - 1 - idx);
@@ -167,8 +214,8 @@ export function appendToRingBuffer(
 }
 
 /**
- * Builds deterministic initial 30-second telemetry buffer for a service so that
- * even right after startup, the user has 30 seconds of historical metrics ready.
+ * Builds deterministic initial 30-second telemetry buffer for a service.
+ * For custom/real endpoints, initializes with zeros until the TCP probe responds.
  */
 export function seedInitial30sBuffer(
   basePrimary: number,
@@ -176,16 +223,45 @@ export function seedInitial30sBuffer(
   baseLatency: number,
   warningThreshold: number,
   criticalThreshold: number,
-  nowEpochMs: number = Date.now()
+  nowEpochMs: number = Date.now(),
+  endpointUrl: string = ''
 ): MetricSample[] {
   const samples: MetricSample[] = [];
+  const cleanedUrl = (endpointUrl || '').trim();
+  const isCustomOrEmpty = !cleanedUrl || !isDemoEndpoint(cleanedUrl);
+
+  if (cleanedUrl && !isDemoEndpoint(cleanedUrl)) {
+    triggerBackgroundProbePoll(cleanedUrl);
+  }
+
   for (let i = 29; i >= 0; i--) {
     const sampleEpoch = nowEpochMs - i * 1000;
-    const wave = Math.sin(i * 0.45) * (basePrimary * 0.08) + Math.cos(i * 0.25) * (basePrimary * 0.04);
+
+    if (isCustomOrEmpty) {
+      samples.push({
+        timestamp: new Date(sampleEpoch).toISOString(),
+        epochMs: sampleEpoch,
+        relativeSec: i === 0 ? 0 : -i,
+        primaryValue: 0,
+        secondaryValue: 0,
+        latencyMs: 0,
+        errorRate: 0,
+        status: 'nominal',
+        note: 'Очікування перевірки порту...',
+      });
+      continue;
+    }
+
+    const wave =
+      Math.sin(i * 0.45) * (basePrimary * 0.08) +
+      Math.cos(i * 0.25) * (basePrimary * 0.04);
     const primaryValue = Number(Math.max(1, basePrimary + wave).toFixed(1));
     const secondaryWave = Math.cos(i * 0.35) * (baseSecondary * 0.07);
-    const secondaryValue = Number(Math.max(0.5, baseSecondary + secondaryWave).toFixed(1));
-    const latencyMs = Math.max(2, Math.round(baseLatency + Math.sin(i * 0.6) * (baseLatency * 0.15)));
+    const secondaryValue = Math.max(1, Math.round(baseSecondary + secondaryWave));
+    const latencyMs = Math.max(
+      2,
+      Math.round(baseLatency + Math.sin(i * 0.6) * (baseLatency * 0.15))
+    );
     const status: ServiceStatus =
       primaryValue >= criticalThreshold
         ? 'critical'
@@ -210,22 +286,85 @@ export function seedInitial30sBuffer(
 
 /**
  * Generates the next 1-second telemetry sample for a service feed.
- * If `forceMode === 'crash'`, generates a realistic failure spike over the buffer so
- * the 20-30s crash blackbox shows a clear anomaly escalation.
+ * Uses real TCP socket status for non-demo endpoints.
  */
 export function generateNextTelemetrySample(
   service: ServiceFeed,
   nowEpochMs: number = Date.now(),
   forceMode?: 'crash' | 'warning' | 'recover'
 ): MetricSample {
+  const endpointKey = (service.endpointUrl || '').trim();
+
+  // 1. Якщо Endpoint URL взагалі порожній - відразу помилка без фейкових цифр
+  if (!endpointKey) {
+    service.nodesOnline = 0;
+    return {
+      timestamp: new Date(nowEpochMs).toISOString(),
+      epochMs: nowEpochMs,
+      relativeSec: 0,
+      primaryValue: 0,
+      secondaryValue: 0,
+      latencyMs: 0,
+      errorRate: 100,
+      status: 'critical',
+      note: 'ВУЗОЛ НЕ НАЛАШТОВАНО (вкажіть IP/порт)',
+    };
+  }
+
+  const isCustomRealEndpoint = !isDemoEndpoint(endpointKey);
+
+  if (isCustomRealEndpoint) {
+    triggerBackgroundProbePoll(endpointKey);
+    const probe = clientProbeCache[endpointKey];
+
+    // Поки перший запит до сокета ще триває (перша секунда) - тримаємо нулі, а не фейкові 45%
+    if (!probe) {
+      service.nodesOnline = 0;
+      return {
+        timestamp: new Date(nowEpochMs).toISOString(),
+        epochMs: nowEpochMs,
+        relativeSec: 0,
+        primaryValue: 0,
+        secondaryValue: 0,
+        latencyMs: 0,
+        errorRate: 0,
+        status: 'warning',
+        note: `Перевірка з'єднання з ${endpointKey}...`,
+      };
+    }
+
+    // Якщо сокет відповів, що порт закритий / недоступний
+    if (!probe.online && forceMode !== 'recover') {
+      service.nodesOnline = 0;
+      return {
+        timestamp: new Date(nowEpochMs).toISOString(),
+        epochMs: nowEpochMs,
+        relativeSec: 0,
+        primaryValue: 0,
+        secondaryValue: 0,
+        latencyMs: 0,
+        errorRate: 100,
+        status: 'critical',
+        note: `ВУЗОЛ НЕДОСТУПНИЙ (${probe.host}:${probe.port} - ${probe.error || 'OFFLINE'})`,
+      };
+    }
+
+    if (probe.online) {
+      service.nodesOnline = service.nodesTotal;
+    }
+  }
+
+  const probe = clientProbeCache[endpointKey];
   const last = service.ringBuffer30s[service.ringBuffer30s.length - 1];
-  const prevPrimary = last ? last.primaryValue : service.warningThreshold * 0.6;
-  const prevSecondary = last ? last.secondaryValue : 45;
-  const prevLatency = last ? last.latencyMs : 18;
+  const prevPrimary =
+    last && last.primaryValue > 0 ? last.primaryValue : service.warningThreshold * 0.6;
+  const prevSecondary =
+    last && last.secondaryValue > 0 ? Math.round(last.secondaryValue) : 45;
+  const prevLatency = last && last.latencyMs > 0 ? last.latencyMs : 18;
 
   if (forceMode === 'crash') {
     const spikePrimary = Number((service.criticalThreshold * 1.22).toFixed(1));
-    const spikeSecondary = Number((prevSecondary * 1.65 + 25).toFixed(1));
+    const spikeSecondary = Math.round(prevSecondary * 1.65 + 25);
     const spikeLatency = Math.round(prevLatency * 4.5 + 190);
     return {
       timestamp: new Date(nowEpochMs).toISOString(),
@@ -241,13 +380,15 @@ export function generateNextTelemetrySample(
   }
 
   if (forceMode === 'warning') {
-    const warnPrimary = Number(((service.warningThreshold + service.criticalThreshold) / 2).toFixed(1));
+    const warnPrimary = Number(
+      ((service.warningThreshold + service.criticalThreshold) / 2).toFixed(1)
+    );
     return {
       timestamp: new Date(nowEpochMs).toISOString(),
       epochMs: nowEpochMs,
       relativeSec: 0,
       primaryValue: warnPrimary,
-      secondaryValue: Number((prevSecondary * 1.2).toFixed(1)),
+      secondaryValue: Math.round(prevSecondary * 1.2),
       latencyMs: Math.round(prevLatency * 1.7 + 25),
       errorRate: 2.4,
       status: 'warning',
@@ -262,25 +403,29 @@ export function generateNextTelemetrySample(
       epochMs: nowEpochMs,
       relativeSec: 0,
       primaryValue: safePrimary,
-      secondaryValue: Number(Math.max(10, prevSecondary * 0.7).toFixed(1)),
-      latencyMs: 14,
+      secondaryValue: Math.max(1, Math.round(prevSecondary * 0.7)),
+      latencyMs: probe?.online ? probe.latencyMs : 14,
       errorRate: 0.02,
       status: 'nominal',
       note: 'Відновлено нормальний режим роботи',
     };
   }
 
-  // Normal live drift
+  // Штатна робота (для живих портів підставляється реальний latencyMs із TCP-сокета)
   const phase = (nowEpochMs / 1000) % 60;
   const baseline = service.warningThreshold * 0.62;
   const drift = Math.sin(phase * 0.3) * (service.warningThreshold * 0.09);
   const nextPrimary = Number(
     Math.max(1, prevPrimary * 0.65 + (baseline + drift) * 0.35).toFixed(1)
   );
-  const nextSecondary = Number(
-    Math.max(1, prevSecondary * 0.8 + (40 + Math.cos(phase * 0.25) * 12) * 0.2).toFixed(1)
+  const nextSecondary = Math.max(
+    1,
+    Math.round(prevSecondary * 0.8 + (40 + Math.cos(phase * 0.25) * 12) * 0.2)
   );
-  const nextLatency = Math.max(3, Math.round(prevLatency * 0.7 + (16 + Math.sin(phase) * 6) * 0.3));
+  const nextLatency =
+    isCustomRealEndpoint && probe?.online
+      ? probe.latencyMs
+      : Math.max(3, Math.round(prevLatency * 0.7 + (16 + Math.sin(phase) * 6) * 0.3));
 
   const status: ServiceStatus =
     nextPrimary >= service.criticalThreshold
@@ -298,25 +443,30 @@ export function generateNextTelemetrySample(
     latencyMs: nextLatency,
     errorRate: status === 'critical' ? 8.2 : status === 'warning' ? 1.5 : 0.04,
     status,
-    note: status === 'nominal' ? 'Отримано телеметрію OK' : 'Перевищення порогу',
+    note:
+      isCustomRealEndpoint && probe?.online
+        ? `TCP порт ${probe.host}:${probe.port} ONLINE (${probe.latencyMs} мс)`
+        : status === 'nominal'
+        ? 'Отримано телеметрію OK'
+        : 'Перевищення порогу',
   };
 }
 
 /**
- * Captures the last 20–30 seconds of metrics from a service's ring buffer during a failure.
- * Produces a complete forensic blackbox report explaining what went wrong in the final 20–30s.
+ * Captures the last 20-30 seconds of metrics from a service's ring buffer during a failure.
+ * Produces a complete forensic blackbox report explaining what went wrong in the final 20-30s.
  */
 export function captureCrashBlackbox(
   service: ServiceFeed,
   triggerReason: string,
   crashEpochMs: number = Date.now()
 ): CrashBlackboxReport {
-  // Extract the last 20 to 30 samples (up to 30 seconds of pre-crash data)
   const rawSamples = service.ringBuffer30s.slice(-30);
   const latestEpoch = rawSamples[rawSamples.length - 1]?.epochMs ?? crashEpochMs;
 
   const samples20to30s: MetricSample[] = rawSamples.map((s, idx) => ({
     ...s,
+    secondaryValue: Math.round(s.secondaryValue),
     relativeSec: -(rawSamples.length - 1 - idx),
   }));
 
@@ -326,7 +476,9 @@ export function captureCrashBlackbox(
   const peakPrimaryValue = primaryValues.length ? Math.max(...primaryValues) : 0;
   const firstPrimaryValue = primaryValues[0] ?? 0;
   const avgPrimaryValue = primaryValues.length
-    ? Number((primaryValues.reduce((a, b) => a + b, 0) / primaryValues.length).toFixed(1))
+    ? Number(
+        (primaryValues.reduce((a, b) => a + b, 0) / primaryValues.length).toFixed(1)
+      )
     : 0;
   const peakLatencyMs = latencies.length ? Math.max(...latencies) : 0;
   const deltaPercent =
@@ -340,27 +492,33 @@ export function captureCrashBlackbox(
   switch (service.serviceType) {
     case 'wazuh':
       rootCauseDiagnosis = `За останні ${samples20to30s.length} сек зафіксовано сплеск подій безпеки (+${deltaPercent}%, пік ${peakPrimaryValue} ${service.primaryMetricUnit}). Переповнення черги аналізатора Wazuh Manager через масовану brute-force / FIM активність на вузлах.`;
-      recommendedAction = 'Ізолювати підозрілі агенти, збільшити пул воркерів wazuh-analysisd та відновити конфігурацію з останнього бекапу.';
+      recommendedAction =
+        'Ізолювати підозрілі агенти, збільшити пул воркерів wazuh-analysisd та відновити конфігурацію з останнього бекапу.';
       break;
     case 'zabbix':
       rootCauseDiagnosis = `Протягом останніх ${samples20to30s.length} сек утилізація CPU/Poller зросла до ${peakPrimaryValue}${service.primaryMetricUnit} при затримці бази ${peakLatencyMs} мс. Вичерпано пул з'єднань Zabbix History Syncer.`;
-      recommendedAction = 'Очистити завислі сесії БД, перезапустити пул zabbix-server poller та застосувати точку відновлення.';
+      recommendedAction =
+        'Очистити завислі сесії БД, перезапустити пул zabbix-server poller та застосувати точку відновлення.';
       break;
     case 'ceph':
       rootCauseDiagnosis = `У вікні останніх ${samples20to30s.length} сек латентність OSD у кластері Ceph (Seph) зросла на +${deltaPercent}% (пік IOPS/Навантаження: ${peakPrimaryValue} ${service.primaryMetricUnit}, затримка ${peakLatencyMs} мс). Виявлено деградацію Placement Groups (PGs degraded / slow ops).`;
-      recommendedAction = 'Перевірити статус OSD дисків (ceph osd tree), призупинити глибокий скрабінг (noscrub) і відновити ваги PG з бекапу.';
+      recommendedAction =
+        'Перевірити статус OSD дисків (ceph osd tree), призупинити глибокий скрабінг (noscrub) і відновити ваги PG з бекапу.';
       break;
     case 'redis':
       rootCauseDiagnosis = `За останні ${samples20to30s.length} сек використання пам'яті та потік операцій Redis досягли ${peakPrimaryValue} ${service.primaryMetricUnit} (затримка ${peakLatencyMs} мс). Спрацював OOM Eviction / блокування основного потоку при записі RDB снапшоту.`;
-      recommendedAction = 'Увімкнути політику allkeys-lru, скинути важкі Lua-скрипти та відновити стан кешу з хмарної резервної копії.';
+      recommendedAction =
+        'Увімкнути політику allkeys-lru, скинути важкі Lua-скрипти та відновити стан кешу з хмарної резервної копії.';
       break;
     case 'rabbitmq':
       rootCauseDiagnosis = `За останні ${samples20to30s.length} сек черга непідтверджених повідомлень (Unacked) зросла до ${peakPrimaryValue} ${service.primaryMetricUnit}. Воркери-споживачі перестали надсилати ACK, спрацював Memory Alarm брокера.`;
-      recommendedAction = 'Перезапустити завислі консьюмери, перенаправити трафік у Dead Letter Exchange та відновити топологію черг.';
+      recommendedAction =
+        'Перезапустити завислі консьюмери, перенаправити трафік у Dead Letter Exchange та відновити топологію черг.';
       break;
     default:
-      rootCauseDiagnosis = `За останні ${samples20to30s.length} сек метрика "${service.primaryMetricLabel}" перевищила критичний поріг (${peakPrimaryValue} > ${service.criticalThreshold} ${service.primaryMetricUnit}), затримка зросла до ${peakLatencyMs} мс (+${deltaPercent}%).`;
-      recommendedAction = 'Перевірити доступність вузла, переглянути 30-секундний дамп телеметрії та виконати відновлення з останнього бекапу.';
+      rootCauseDiagnosis = `За останні ${samples20to30s.length} сек зафіксовано відмову або перевищення порогу на "${service.endpointUrl || service.name}" (пік: ${peakPrimaryValue} ${service.primaryMetricUnit}, затримка ${peakLatencyMs} мс).`;
+      recommendedAction =
+        'Перевірити доступність TCP-порту вузла, переглянути 30-секундний дамп телеметрії та виконати відновлення з останнього бекапу.';
       break;
   }
 
@@ -391,10 +549,15 @@ export function captureCrashBlackbox(
 /**
  * Filters Cloud Query History logs by search query, group, status, and date range (`dateFrom` / `dateTo`).
  */
-export function filterQueryLogs(logs: CloudQueryLog[], criteria: LogFilterCriteria): CloudQueryLog[] {
+export function filterQueryLogs(
+  logs: CloudQueryLog[],
+  criteria: LogFilterCriteria
+): CloudQueryLog[] {
   const searchLower = (criteria.search || '').trim().toLowerCase();
-  const groupFilter = criteria.group && criteria.group !== 'ALL' ? criteria.group : null;
-  const statusFilter = criteria.status && criteria.status !== 'ALL' ? criteria.status : null;
+  const groupFilter =
+    criteria.group && criteria.group !== 'ALL' ? criteria.group : null;
+  const statusFilter =
+    criteria.status && criteria.status !== 'ALL' ? criteria.status : null;
 
   const fromEpoch = criteria.dateFrom ? new Date(criteria.dateFrom).getTime() : null;
   const toEpoch = criteria.dateTo ? new Date(criteria.dateTo).getTime() : null;
@@ -452,7 +615,6 @@ export function createBackupSnapshot(
     forensicSummary = `Усі ${services.length} сервісів працюють у штатному режимі. Чиста еталонна точка відновлення конфігурації та історії запитів.`;
   }
 
-  // Deep clone payload so future mutations don't alter stored backup
   const clonedPayload = JSON.parse(
     JSON.stringify({
       services,
@@ -466,7 +628,9 @@ export function createBackupSnapshot(
     id: `bkp-${nowEpochMs}-${Math.random().toString(36).slice(2, 6)}`,
     createdAt: new Date(nowEpochMs).toISOString(),
     epochMs: nowEpochMs,
-    label: label.trim() || `Хмарний знімок стану #${new Date(nowEpochMs).toLocaleTimeString('uk-UA')}`,
+    label:
+      label.trim() ||
+      `Хмарний знімок стану #${new Date(nowEpochMs).toLocaleTimeString('uk-UA')}`,
     autoCreated,
     servicesCount: services.length,
     logsCount: logs.length,
@@ -523,7 +687,7 @@ export function formatMetricsToCSV(
         escapeCsv(`${s.primaryMetricLabel} (${s.primaryMetricUnit})`),
         escapeCsv(latest?.primaryValue ?? 0),
         escapeCsv(`${s.secondaryMetricLabel} (${s.secondaryMetricUnit})`),
-        escapeCsv(latest?.secondaryValue ?? 0),
+        escapeCsv(Math.round(latest?.secondaryValue ?? 0)),
         escapeCsv(latest?.latencyMs ?? 0),
         escapeCsv(`${s.nodesOnline}/${s.nodesTotal}`),
         escapeCsv(s.lastUpdated),
@@ -534,9 +698,16 @@ export function formatMetricsToCSV(
   rows.push('');
   rows.push('=== 2. АВАРІЙНІ ДАМПИ ОСТАННІХ 20-30 СЕКУНД (BLACKBOX) ===');
   rows.push(
-    ['ID Звіту', 'Камера', 'Сервіс', 'Час збою', 'Вікно (сек)', 'Пікове значення', 'Пікова затримка (мс)', 'Діагноз (Що пішло не так)'].join(
-      ','
-    )
+    [
+      'ID Звіту',
+      'Камера',
+      'Сервіс',
+      'Час збою',
+      'Вікно (сек)',
+      'Пікове значення',
+      'Пікова затримка (мс)',
+      'Діагноз (Що пішло не так)',
+    ].join(',')
   );
   for (const b of blackboxReports) {
     rows.push(
@@ -555,7 +726,18 @@ export function formatMetricsToCSV(
 
   rows.push('');
   rows.push('=== 3. ПОСЕКУНДНІ МЕТРИКИ ОСТАННІХ 30 СЕКУНД ПО КОЖНОМУ СЕРВІСУ ===');
-  rows.push(['Камера', 'Сервіс', 'Відносний час (сек)', 'Час ISO', 'Основна метрика', 'Додаткова метрика', 'Затримка (мс)', 'Статус'].join(','));
+  rows.push(
+    [
+      'Камера',
+      'Сервіс',
+      'Відносний час (сек)',
+      'Час ISO',
+      'Основна метрика',
+      'Додаткова метрика',
+      'Затримка (мс)',
+      'Статус',
+    ].join(',')
+  );
   for (const s of services) {
     for (const sample of s.ringBuffer30s.slice(-30)) {
       rows.push(
@@ -565,7 +747,7 @@ export function formatMetricsToCSV(
           escapeCsv(`${sample.relativeSec}s`),
           escapeCsv(sample.timestamp),
           escapeCsv(`${sample.primaryValue} ${s.primaryMetricUnit}`),
-          escapeCsv(`${sample.secondaryValue} ${s.secondaryMetricUnit}`),
+          escapeCsv(`${Math.round(sample.secondaryValue)} ${s.secondaryMetricUnit}`),
           escapeCsv(sample.latencyMs),
           escapeCsv(sample.status),
         ].join(',')
@@ -575,7 +757,19 @@ export function formatMetricsToCSV(
 
   rows.push('');
   rows.push('=== 4. ІСТОРІЯ ЗАПИТІВ У ХМАРНОМУ СХОВИЩІ ===');
-  rows.push(['Час', 'Сервіс', 'Група', 'Тип запиту', 'Ендпоінт', 'Статус', 'Затримка (мс)', 'Опис', 'Метрики'].join(','));
+  rows.push(
+    [
+      'Час',
+      'Сервіс',
+      'Група',
+      'Тип запиту',
+      'Ендпоінт',
+      'Статус',
+      'Затримка (мс)',
+      'Опис',
+      'Метрики',
+    ].join(',')
+  );
   for (const l of logs.slice(0, 100)) {
     rows.push(
       [
@@ -597,7 +791,6 @@ export function formatMetricsToCSV(
 
 /**
  * Formats a concise confirmation question for deleting a service or widget dashboard.
- * Example: "Wazuh SIEM" -> "Чи хочете ви видалити Wazuh SIEM дашборд?"
  */
 export function formatDeleteDashboardPrompt(rawName: string): string {
   const trimmed = rawName.trim() || 'обраний';
@@ -655,16 +848,46 @@ export const STANDARD_ENDPOINT_TEMPLATES: Array<{
   label: string;
   url: string;
 }> = [
-  { label: 'Prometheus Node / Service Exporter (:9100)', url: 'https://metrics.internal.noc:9100/metrics' },
-  { label: 'Wazuh SIEM Manager API (:55000)', url: 'https://wazuh.internal.noc:55000/v4/events' },
-  { label: 'Zabbix JSON-RPC Endpoint', url: 'https://zabbix.internal.noc/api_jsonrpc.php' },
-  { label: 'Ceph (Seph) Manager / RGW (:8443)', url: 'https://ceph-rgw.internal.noc:8443/api/osd' },
-  { label: 'Redis Cluster Info (:6379)', url: 'redis://redis-cluster.internal.noc:6379/info' },
-  { label: 'RabbitMQ Management HTTP API (:15672)', url: 'https://rabbitmq.internal.noc:15672/api/queues' },
-  { label: 'Kubernetes / Prometheus Query API (:9090)', url: 'https://prometheus.internal.noc:9090/api/v1/query' },
-  { label: 'PostgreSQL / Patroni Exporter (:9187)', url: 'https://postgres.internal.noc:9187/metrics' },
-  { label: 'Elasticsearch Cluster Health (:9200)', url: 'https://elastic.internal.noc:9200/_cluster/health' },
-  { label: 'Nginx / HAProxy Ingress Status', url: 'https://ingress.internal.noc/stub_status' },
+  {
+    label: 'Prometheus Node / Service Exporter (:9100)',
+    url: 'https://metrics.internal.noc:9100/metrics',
+  },
+  {
+    label: 'Wazuh SIEM Manager API (:55000)',
+    url: 'https://wazuh.internal.noc:55000/v4/events',
+  },
+  {
+    label: 'Zabbix JSON-RPC Endpoint',
+    url: 'https://zabbix.internal.noc/api_jsonrpc.php',
+  },
+  {
+    label: 'Ceph (Seph) Manager / RGW (:8443)',
+    url: 'https://ceph-rgw.internal.noc:8443/api/osd',
+  },
+  {
+    label: 'Redis Cluster Info (:6379)',
+    url: 'redis://redis-cluster.internal.noc:6379/info',
+  },
+  {
+    label: 'RabbitMQ Management HTTP API (:15672)',
+    url: 'https://rabbitmq.internal.noc:15672/api/queues',
+  },
+  {
+    label: 'Kubernetes / Prometheus Query API (:9090)',
+    url: 'https://prometheus.internal.noc:9090/api/v1/query',
+  },
+  {
+    label: 'PostgreSQL / Patroni Exporter (:9187)',
+    url: 'https://postgres.internal.noc:9187/metrics',
+  },
+  {
+    label: 'Elasticsearch Cluster Health (:9200)',
+    url: 'https://elastic.internal.noc:9200/_cluster/health',
+  },
+  {
+    label: 'Nginx / HAProxy Ingress Status',
+    url: 'https://ingress.internal.noc/stub_status',
+  },
 ];
 
 export const STANDARD_PRIMARY_METRICS: StandardPrimaryMetricOption[] = [
@@ -823,15 +1046,35 @@ export const STANDARD_THRESHOLD_PRESETS: StandardThresholdPresetOption[] = [
   { id: 'ram-high', label: "Пам'ять / Дисковий пул (80% / 92%)", warn: 80, crit: 92 },
   { id: 'siem-eps', label: 'Потік подій SIEM (350 / 480 подій/с)', warn: 350, crit: 480 },
   { id: 'storage-iops', label: 'Сховище Ceph/SAN (80 / 105 kIOPS)', warn: 80, crit: 105 },
-  { id: 'cache-ops', label: 'Високонавантажений кеш (115 / 150 тис. ops/s)', warn: 115, crit: 150 },
-  { id: 'mq-queue', label: 'Черга брокера RabbitMQ (40 / 65 тис. msg)', warn: 40, crit: 65 },
+  {
+    id: 'cache-ops',
+    label: 'Високонавантажений кеш (115 / 150 тис. ops/s)',
+    warn: 115,
+    crit: 150,
+  },
+  {
+    id: 'mq-queue',
+    label: 'Черга брокера RabbitMQ (40 / 65 тис. msg)',
+    warn: 40,
+    crit: 65,
+  },
   { id: 'k8s-mem', label: 'Кластер Kubernetes (64 / 80 ГБ)', warn: 64, crit: 80 },
   { id: 'api-latency', label: 'Латентність API (200 / 450 мс)', warn: 200, crit: 450 },
   { id: 'http-rps', label: 'Трафік Web/API (1200 / 1800 req/s)', warn: 1200, crit: 1800 },
-  { id: 'disk-io', label: 'Дисковий ввід/вивід (350 / 500 МБ/с)', warn: 350, crit: 500 },
+  {
+    id: 'disk-io',
+    label: 'Дисковий ввід/вивід (350 / 500 МБ/с)',
+    warn: 350,
+    crit: 500,
+  },
   { id: 'net-gbps', label: 'Магістральний канал 10G (7 / 9.5 Гбіт/с)', warn: 7, crit: 9.5 },
   { id: 'err-rate', label: 'Помилки HTTP 5xx (15 / 40 помилок/с)', warn: 15, crit: 40 },
-  { id: 'db-conn', label: "Пул з'єднань СУБД (180 / 240 з'єднань)", warn: 180, crit: 240 },
+  {
+    id: 'db-conn',
+    label: "Пул з'єднань СУБД (180 / 240 з'єднань)",
+    warn: 180,
+    crit: 240,
+  },
 ];
 
 export const STANDARD_NODE_COUNTS: Array<{ value: number; label: string }> = [
@@ -878,10 +1121,6 @@ export interface AddServiceFormState {
   accentColor: string;
 }
 
-/**
- * Returns a clean, reset state for the Add Service modal so previously selected
- * templates do not remain stuck in textboxes or parameter fields.
- */
 export function createDefaultServiceFormState(
   defaultGroup: string = 'Інфраструктура'
 ): AddServiceFormState {
@@ -1038,9 +1277,6 @@ export function createDefaultServiceTemplates(): ServicePresetTemplate[] {
   ];
 }
 
-/**
- * Pure helper to add a new template or update an existing template by ID.
- */
 export function upsertServiceTemplate(
   templates: ServicePresetTemplate[],
   candidate: ServicePresetTemplate
@@ -1052,9 +1288,6 @@ export function upsertServiceTemplate(
   return [...templates, { ...candidate }];
 }
 
-/**
- * Pure helper to delete a template by ID.
- */
 export function removeServiceTemplate(
   templates: ServicePresetTemplate[],
   templateId: string
@@ -1062,10 +1295,6 @@ export function removeServiceTemplate(
   return templates.filter((t) => t.id !== templateId);
 }
 
-/**
- * Creates the reference set of 5 monitoring cameras (used by unit tests or optional staging templates):
- * Wazuh SIEM, Zabbix, Ceph (Seph), Redis, and RabbitMQ.
- */
 export function createInitialServices(nowEpochMs: number = Date.now()): ServiceFeed[] {
   return [
     {
@@ -1091,7 +1320,15 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
       nodesOnline: 142,
       nodesTotal: 142,
       lastUpdated: new Date(nowEpochMs).toISOString(),
-      ringBuffer30s: seedInitial30sBuffer(245, 14, 19, 380, 500, nowEpochMs),
+      ringBuffer30s: seedInitial30sBuffer(
+        245,
+        14,
+        19,
+        380,
+        500,
+        nowEpochMs,
+        'https://wazuh.internal.noc:55000/v4/overview/agents'
+      ),
     },
     {
       id: 'srv-zabbix',
@@ -1116,7 +1353,15 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
       nodesOnline: 64,
       nodesTotal: 64,
       lastUpdated: new Date(nowEpochMs).toISOString(),
-      ringBuffer30s: seedInitial30sBuffer(48.5, 6.4, 12, 75, 90, nowEpochMs),
+      ringBuffer30s: seedInitial30sBuffer(
+        48.5,
+        6,
+        12,
+        75,
+        90,
+        nowEpochMs,
+        'https://zabbix.internal.noc/api_jsonrpc.php'
+      ),
     },
     {
       id: 'srv-ceph',
@@ -1141,7 +1386,15 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
       nodesOnline: 36,
       nodesTotal: 36,
       lastUpdated: new Date(nowEpochMs).toISOString(),
-      ringBuffer30s: seedInitial30sBuffer(54.2, 4.8, 15, 85, 110, nowEpochMs),
+      ringBuffer30s: seedInitial30sBuffer(
+        54.2,
+        5,
+        15,
+        85,
+        110,
+        nowEpochMs,
+        'https://ceph-mgr.internal.noc:8443/api/health/full'
+      ),
     },
     {
       id: 'srv-redis',
@@ -1166,7 +1419,15 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
       nodesOnline: 12,
       nodesTotal: 12,
       lastUpdated: new Date(nowEpochMs).toISOString(),
-      ringBuffer30s: seedInitial30sBuffer(82.4, 61.5, 4, 120, 155, nowEpochMs),
+      ringBuffer30s: seedInitial30sBuffer(
+        82.4,
+        62,
+        4,
+        120,
+        155,
+        nowEpochMs,
+        'redis://redis-cluster.internal.noc:6379/info'
+      ),
     },
     {
       id: 'srv-rabbitmq',
@@ -1191,7 +1452,15 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
       nodesOnline: 8,
       nodesTotal: 8,
       lastUpdated: new Date(nowEpochMs).toISOString(),
-      ringBuffer30s: seedInitial30sBuffer(18.6, 1420, 9, 45, 70, nowEpochMs),
+      ringBuffer30s: seedInitial30sBuffer(
+        18.6,
+        1420,
+        9,
+        45,
+        70,
+        nowEpochMs,
+        'https://rabbitmq.internal.noc:15672/api/overview'
+      ),
     },
   ];
 }
