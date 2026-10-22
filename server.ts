@@ -41,7 +41,6 @@ function parseEndpointTarget(rawEndpoint: string): { host: string; port: number;
     return { host: '127.0.0.1', port: 0, isDemoHost: false };
   }
 
-  // Якщо ввели просто номер порту, наприклад "1111" або ":1111"
   if (/^:?\d{1,5}$/.test(cleaned)) {
     return {
       host: '127.0.0.1',
@@ -54,7 +53,6 @@ function parseEndpointTarget(rawEndpoint: string): { host: string; port: number;
     const withProtocol = cleaned.includes('://') ? cleaned : `http://${cleaned}`;
     const parsed = new URL(withProtocol);
     const host = parsed.hostname || '127.0.0.1';
-    const isDemoHost = host.endsWith('.internal.noc') || host.endsWith('.demo.noc');
     let port = parsed.port ? parseInt(parsed.port, 10) : 0;
 
     if (!port) {
@@ -63,15 +61,14 @@ function parseEndpointTarget(rawEndpoint: string): { host: string; port: number;
       else port = 80;
     }
 
-    return { host, port, isDemoHost };
+    return { host, port, isDemoHost: false };
   } catch {
     const match = cleaned.match(/^([^:/]+):(\d{1,5})/);
     if (match) {
-      const host = match[1];
       return {
-        host,
+        host: match[1],
         port: parseInt(match[2], 10),
-        isDemoHost: host.endsWith('.internal.noc'),
+        isDemoHost: false,
       };
     }
     return { host: '127.0.0.1', port: 0, isDemoHost: false };
@@ -79,18 +76,7 @@ function parseEndpointTarget(rawEndpoint: string): { host: string; port: number;
 }
 
 function checkTcpTarget(rawEndpoint: string, timeoutMs = 1200): Promise<LiveProbeResult> {
-  const { host, port, isDemoHost } = parseEndpointTarget(rawEndpoint);
-
-  if (isDemoHost) {
-    return Promise.resolve({
-      online: true,
-      latencyMs: 12,
-      isDemoHost: true,
-      host,
-      port,
-      checkedAt: Date.now(),
-    });
-  }
+  const { host, port } = parseEndpointTarget(rawEndpoint);
 
   if (!port || isNaN(port) || port < 1 || port > 65535) {
     return Promise.resolve({

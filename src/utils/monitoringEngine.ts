@@ -1,4 +1,4 @@
-export type ServiceStatus = 'nominal' | 'warning' | 'critical';
+﻿export type ServiceStatus = 'nominal' | 'warning' | 'critical';
 export type ChartStyleType = 'line' | 'bar' | 'radar' | 'doughnut';
 
 export interface MetricSample {
@@ -150,7 +150,6 @@ export interface LogFilterCriteria {
 
 export const DEFAULT_RING_BUFFER_SIZE = 30;
 
-// Кеш реальних перевірок портів із бекенду Express
 const clientProbeCache: Record<
   string,
   {
@@ -164,15 +163,10 @@ const clientProbeCache: Record<
 > = {};
 let lastProbePollMs = 0;
 
-function isDemoEndpoint(endpointUrl: string): boolean {
-  const cleaned = (endpointUrl || '').trim().toLowerCase();
-  return cleaned.includes('.internal.noc') || cleaned.includes('.demo.noc');
-}
-
 function triggerBackgroundProbePoll(endpointUrl: string): void {
   if (typeof window === 'undefined') return;
   const key = (endpointUrl || '').trim();
-  if (!key || isDemoEndpoint(key)) return;
+  if (!key) return;
 
   const now = Date.now();
   if (now - lastProbePollMs < 1000 && clientProbeCache[key]) return;
@@ -192,10 +186,6 @@ function triggerBackgroundProbePoll(endpointUrl: string): void {
     .catch(() => {});
 }
 
-/**
- * Appends a new metric sample to the service's 30-second rolling buffer,
- * keeping at most `maxSamples` (default 30 seconds) and recalculating `relativeSec`.
- */
 export function appendToRingBuffer(
   buffer: MetricSample[],
   newSample: MetricSample,
@@ -213,81 +203,39 @@ export function appendToRingBuffer(
   });
 }
 
-/**
- * Builds deterministic initial 30-second telemetry buffer for a service.
- * For custom/real endpoints, initializes with zeros until the TCP probe responds.
- */
 export function seedInitial30sBuffer(
-  basePrimary: number,
-  baseSecondary: number,
-  baseLatency: number,
-  warningThreshold: number,
-  criticalThreshold: number,
+  _basePrimary: number,
+  _baseSecondary: number,
+  _baseLatency: number,
+  _warningThreshold: number,
+  _criticalThreshold: number,
   nowEpochMs: number = Date.now(),
   endpointUrl: string = ''
 ): MetricSample[] {
   const samples: MetricSample[] = [];
   const cleanedUrl = (endpointUrl || '').trim();
-  const isCustomOrEmpty = !cleanedUrl || !isDemoEndpoint(cleanedUrl);
 
-  if (cleanedUrl && !isDemoEndpoint(cleanedUrl)) {
+  if (cleanedUrl) {
     triggerBackgroundProbePoll(cleanedUrl);
   }
 
   for (let i = 29; i >= 0; i--) {
     const sampleEpoch = nowEpochMs - i * 1000;
-
-    if (isCustomOrEmpty) {
-      samples.push({
-        timestamp: new Date(sampleEpoch).toISOString(),
-        epochMs: sampleEpoch,
-        relativeSec: i === 0 ? 0 : -i,
-        primaryValue: 0,
-        secondaryValue: 0,
-        latencyMs: 0,
-        errorRate: 0,
-        status: 'nominal',
-        note: 'Очікування перевірки порту...',
-      });
-      continue;
-    }
-
-    const wave =
-      Math.sin(i * 0.45) * (basePrimary * 0.08) +
-      Math.cos(i * 0.25) * (basePrimary * 0.04);
-    const primaryValue = Number(Math.max(1, basePrimary + wave).toFixed(1));
-    const secondaryWave = Math.cos(i * 0.35) * (baseSecondary * 0.07);
-    const secondaryValue = Math.max(1, Math.round(baseSecondary + secondaryWave));
-    const latencyMs = Math.max(
-      2,
-      Math.round(baseLatency + Math.sin(i * 0.6) * (baseLatency * 0.15))
-    );
-    const status: ServiceStatus =
-      primaryValue >= criticalThreshold
-        ? 'critical'
-        : primaryValue >= warningThreshold
-        ? 'warning'
-        : 'nominal';
-
     samples.push({
       timestamp: new Date(sampleEpoch).toISOString(),
       epochMs: sampleEpoch,
       relativeSec: i === 0 ? 0 : -i,
-      primaryValue,
-      secondaryValue,
-      latencyMs,
-      errorRate: status === 'critical' ? 4.8 : status === 'warning' ? 1.2 : 0.05,
-      status,
-      note: status === 'nominal' ? 'Стабільний потік' : 'Підвищене навантаження',
+      primaryValue: 0,
+      secondaryValue: 0,
+      latencyMs: 0,
+      errorRate: 0,
+      status: 'nominal',
+      note: 'Очікування перевірки порту...',
     });
   }
   return samples;
 }
 
-/**
- * Generates the next 1-second telemetry sample for a service feed.
- * Uses real TCP socket status for non-demo endpoints.
- */
 export function generateNextTelemetrySample(
   service: ServiceFeed,
   nowEpochMs: number = Date.now(),
@@ -295,7 +243,6 @@ export function generateNextTelemetrySample(
 ): MetricSample {
   const endpointKey = (service.endpointUrl || '').trim();
 
-  // 1. Якщо Endpoint URL взагалі порожній - відразу помилка без фейкових цифр
   if (!endpointKey) {
     service.nodesOnline = 0;
     return {
@@ -311,126 +258,49 @@ export function generateNextTelemetrySample(
     };
   }
 
-  const isCustomRealEndpoint = !isDemoEndpoint(endpointKey);
-
-  if (isCustomRealEndpoint) {
-    triggerBackgroundProbePoll(endpointKey);
-    const probe = clientProbeCache[endpointKey];
-
-    // Поки перший запит до сокета ще триває (перша секунда) - тримаємо нулі, а не фейкові 45%
-    if (!probe) {
-      service.nodesOnline = 0;
-      return {
-        timestamp: new Date(nowEpochMs).toISOString(),
-        epochMs: nowEpochMs,
-        relativeSec: 0,
-        primaryValue: 0,
-        secondaryValue: 0,
-        latencyMs: 0,
-        errorRate: 0,
-        status: 'warning',
-        note: `Перевірка з'єднання з ${endpointKey}...`,
-      };
-    }
-
-    // Якщо сокет відповів, що порт закритий / недоступний
-    if (!probe.online && forceMode !== 'recover') {
-      service.nodesOnline = 0;
-      return {
-        timestamp: new Date(nowEpochMs).toISOString(),
-        epochMs: nowEpochMs,
-        relativeSec: 0,
-        primaryValue: 0,
-        secondaryValue: 0,
-        latencyMs: 0,
-        errorRate: 100,
-        status: 'critical',
-        note: `ВУЗОЛ НЕДОСТУПНИЙ (${probe.host}:${probe.port} - ${probe.error || 'OFFLINE'})`,
-      };
-    }
-
-    if (probe.online) {
-      service.nodesOnline = service.nodesTotal;
-    }
-  }
-
+  triggerBackgroundProbePoll(endpointKey);
   const probe = clientProbeCache[endpointKey];
-  const last = service.ringBuffer30s[service.ringBuffer30s.length - 1];
-  const prevPrimary =
-    last && last.primaryValue > 0 ? last.primaryValue : service.warningThreshold * 0.6;
-  const prevSecondary =
-    last && last.secondaryValue > 0 ? Math.round(last.secondaryValue) : 45;
-  const prevLatency = last && last.latencyMs > 0 ? last.latencyMs : 18;
 
-  if (forceMode === 'crash') {
-    const spikePrimary = Number((service.criticalThreshold * 1.22).toFixed(1));
-    const spikeSecondary = Math.round(prevSecondary * 1.65 + 25);
-    const spikeLatency = Math.round(prevLatency * 4.5 + 190);
+  // Поки сокет перевіряє порт - строго нулі
+  if (!probe) {
+    service.nodesOnline = 0;
     return {
       timestamp: new Date(nowEpochMs).toISOString(),
       epochMs: nowEpochMs,
       relativeSec: 0,
-      primaryValue: spikePrimary,
-      secondaryValue: spikeSecondary,
-      latencyMs: spikeLatency,
-      errorRate: 14.6,
-      status: 'critical',
-      note: 'КРИТИЧНИЙ ЗБІЙ: Перевищення ліміту та таймаут вузла',
-    };
-  }
-
-  if (forceMode === 'warning') {
-    const warnPrimary = Number(
-      ((service.warningThreshold + service.criticalThreshold) / 2).toFixed(1)
-    );
-    return {
-      timestamp: new Date(nowEpochMs).toISOString(),
-      epochMs: nowEpochMs,
-      relativeSec: 0,
-      primaryValue: warnPrimary,
-      secondaryValue: Math.round(prevSecondary * 1.2),
-      latencyMs: Math.round(prevLatency * 1.7 + 25),
-      errorRate: 2.4,
+      primaryValue: 0,
+      secondaryValue: 0,
+      latencyMs: 0,
+      errorRate: 0,
       status: 'warning',
-      note: 'УВАГА: Відхилення метрики від норми',
+      note: `Перевірка з'єднання з ${endpointKey}...`,
     };
   }
 
-  if (forceMode === 'recover') {
-    const safePrimary = Number((service.warningThreshold * 0.58).toFixed(1));
+  // Якщо порт або хост недоступний (віртуалка вимкнена або домену не існує)
+  if (!probe.online && forceMode !== 'recover') {
+    service.nodesOnline = 0;
     return {
       timestamp: new Date(nowEpochMs).toISOString(),
       epochMs: nowEpochMs,
       relativeSec: 0,
-      primaryValue: safePrimary,
-      secondaryValue: Math.max(1, Math.round(prevSecondary * 0.7)),
-      latencyMs: probe?.online ? probe.latencyMs : 14,
-      errorRate: 0.02,
-      status: 'nominal',
-      note: 'Відновлено нормальний режим роботи',
+      primaryValue: 0,
+      secondaryValue: 0,
+      latencyMs: 0,
+      errorRate: 100,
+      status: 'critical',
+      note: `ВУЗОЛ НЕДОСТУПНИЙ (${probe.host}:${probe.port} - ${probe.error || 'OFFLINE'})`,
     };
   }
 
-  // Штатна робота (для живих портів підставляється реальний latencyMs із TCP-сокета)
-  const phase = (nowEpochMs / 1000) % 60;
-  const baseline = service.warningThreshold * 0.62;
-  const drift = Math.sin(phase * 0.3) * (service.warningThreshold * 0.09);
-  const nextPrimary = Number(
-    Math.max(1, prevPrimary * 0.65 + (baseline + drift) * 0.35).toFixed(1)
-  );
-  const nextSecondary = Math.max(
-    1,
-    Math.round(prevSecondary * 0.8 + (40 + Math.cos(phase * 0.25) * 12) * 0.2)
-  );
-  const nextLatency =
-    isCustomRealEndpoint && probe?.online
-      ? probe.latencyMs
-      : Math.max(3, Math.round(prevLatency * 0.7 + (16 + Math.sin(phase) * 6) * 0.3));
+  // Якщо порт реально відкритий і відповів на TCP-рукостискання:
+  service.nodesOnline = service.nodesTotal;
+  const realLatency = probe.latencyMs;
 
   const status: ServiceStatus =
-    nextPrimary >= service.criticalThreshold
+    realLatency >= service.criticalThreshold
       ? 'critical'
-      : nextPrimary >= service.warningThreshold
+      : realLatency >= service.warningThreshold
       ? 'warning'
       : 'nominal';
 
@@ -438,17 +308,12 @@ export function generateNextTelemetrySample(
     timestamp: new Date(nowEpochMs).toISOString(),
     epochMs: nowEpochMs,
     relativeSec: 0,
-    primaryValue: nextPrimary,
-    secondaryValue: nextSecondary,
-    latencyMs: nextLatency,
-    errorRate: status === 'critical' ? 8.2 : status === 'warning' ? 1.5 : 0.04,
+    primaryValue: realLatency, // Реальний час відгуку сокета замість вигаданих відсотків
+    secondaryValue: 1,         // 1 активне перевірочне з'єднання (ціле число)
+    latencyMs: realLatency,
+    errorRate: 0,
     status,
-    note:
-      isCustomRealEndpoint && probe?.online
-        ? `TCP порт ${probe.host}:${probe.port} ONLINE (${probe.latencyMs} мс)`
-        : status === 'nominal'
-        ? 'Отримано телеметрію OK'
-        : 'Перевищення порогу',
+    note: `TCP порт ${probe.host}:${probe.port} ONLINE (${realLatency} мс)`,
   };
 }
 
@@ -850,43 +715,43 @@ export const STANDARD_ENDPOINT_TEMPLATES: Array<{
 }> = [
   {
     label: 'Prometheus Node / Service Exporter (:9100)',
-    url: 'https://metrics.internal.noc:9100/metrics',
+    url: 'http://192.168.0.241:10248/healthz',
   },
   {
     label: 'Wazuh SIEM Manager API (:55000)',
-    url: 'https://wazuh.internal.noc:55000/v4/events',
+    url: 'http://192.168.0.241:30550/v4/events',
   },
   {
     label: 'Zabbix JSON-RPC Endpoint',
-    url: 'https://zabbix.internal.noc/api_jsonrpc.php',
+    url: 'http://192.168.0.241:8080',
   },
   {
     label: 'Ceph (Seph) Manager / RGW (:8443)',
-    url: 'https://ceph-rgw.internal.noc:8443/api/osd',
+    url: 'http://192.168.0.241:30900/api/osd',
   },
   {
     label: 'Redis Cluster Info (:6379)',
-    url: 'redis://redis-cluster.internal.noc:6379/info',
+    url: 'redis://192.168.0.241:30379/info',
   },
   {
     label: 'RabbitMQ Management HTTP API (:15672)',
-    url: 'https://rabbitmq.internal.noc:15672/api/queues',
+    url: 'http://192.168.0.241:31672/api/queues',
   },
   {
     label: 'Kubernetes / Prometheus Query API (:9090)',
-    url: 'https://prometheus.internal.noc:9090/api/v1/query',
+    url: 'http://192.168.0.241:30500',
   },
   {
     label: 'PostgreSQL / Patroni Exporter (:9187)',
-    url: 'https://postgres.internal.noc:9187/metrics',
+    url: 'http://192.168.0.241:30432',
   },
   {
     label: 'Elasticsearch Cluster Health (:9200)',
-    url: 'https://elastic.internal.noc:9200/_cluster/health',
+    url: 'http://192.168.0.241:30550',
   },
   {
     label: 'Nginx / HAProxy Ingress Status',
-    url: 'https://ingress.internal.noc/stub_status',
+    url: 'http://192.168.0.241:8404/stats',
   },
 ];
 
@@ -1171,7 +1036,7 @@ export function createDefaultServiceTemplates(): ServicePresetTemplate[] {
       label: 'Wazuh SIEM',
       type: 'wazuh',
       group: 'Безпека (SIEM)',
-      endpoint: 'https://wazuh.internal.noc:55000/v4/events',
+      endpoint: 'http://192.168.0.241:30550/v4/events',
       primaryLabel: 'Події безпеки (EPS)',
       primaryUnit: 'подій/с',
       secondaryLabel: 'Критичні FIM тригери',
@@ -1189,7 +1054,7 @@ export function createDefaultServiceTemplates(): ServicePresetTemplate[] {
       label: 'Zabbix Server',
       type: 'zabbix',
       group: 'Інфраструктура',
-      endpoint: 'https://zabbix.internal.noc/api_jsonrpc.php',
+      endpoint: 'http://192.168.0.241:8080',
       primaryLabel: 'Завантаження CPU',
       primaryUnit: '%',
       secondaryLabel: 'Черга тригерів Zabbix',
@@ -1207,7 +1072,7 @@ export function createDefaultServiceTemplates(): ServicePresetTemplate[] {
       label: 'Ceph (Seph) Storage',
       type: 'ceph',
       group: 'Сховище даних',
-      endpoint: 'https://ceph-rgw.internal.noc:8443/api/osd',
+      endpoint: 'http://192.168.0.241:30900/api/osd',
       primaryLabel: 'Пропускна здатність пулу',
       primaryUnit: 'kIOPS',
       secondaryLabel: 'Латентність комміту',
@@ -1225,7 +1090,7 @@ export function createDefaultServiceTemplates(): ServicePresetTemplate[] {
       label: 'Redis Cluster',
       type: 'redis',
       group: 'Черги та Кеш',
-      endpoint: 'redis://redis-cluster.internal.noc:6379/info',
+      endpoint: 'redis://192.168.0.241:30379/info',
       primaryLabel: 'Операцій читання/запису',
       primaryUnit: 'тис. ops/s',
       secondaryLabel: "Фрагментація пам'яті",
@@ -1243,7 +1108,7 @@ export function createDefaultServiceTemplates(): ServicePresetTemplate[] {
       label: 'RabbitMQ Broker',
       type: 'rabbitmq',
       group: 'Черги та Кеш',
-      endpoint: 'https://rabbitmq.internal.noc:15672/api/queues',
+      endpoint: 'http://192.168.0.241:31672/api/queues',
       primaryLabel: 'Непідтверджені (Unacked)',
       primaryUnit: 'тис. msg',
       secondaryLabel: 'Активні консьюмери',
@@ -1261,7 +1126,7 @@ export function createDefaultServiceTemplates(): ServicePresetTemplate[] {
       label: 'Prometheus / Kubernetes',
       type: 'custom',
       group: 'Контейнери (Kubernetes / Docker)',
-      endpoint: 'https://prometheus.internal.noc:9090/api/v1/query',
+      endpoint: 'http://192.168.0.241:30500',
       primaryLabel: "Споживання пам'яті Pod-ів",
       primaryUnit: 'ГБ',
       secondaryLabel: 'Перезапуски контейнерів',
@@ -1303,7 +1168,7 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
       name: 'Wazuh SIEM',
       serviceType: 'wazuh',
       group: 'Безпека (SIEM)',
-      endpointUrl: 'https://wazuh.internal.noc:55000/v4/overview/agents',
+      endpointUrl: 'http://192.168.0.241:30550/v4/overview/agents',
       refreshIntervalSec: 2,
       autoRefreshPage: true,
       status: 'nominal',
@@ -1327,7 +1192,7 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
         380,
         500,
         nowEpochMs,
-        'https://wazuh.internal.noc:55000/v4/overview/agents'
+        'http://192.168.0.241:30550/v4/overview/agents'
       ),
     },
     {
@@ -1336,7 +1201,7 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
       name: 'Zabbix Core Infrastructure',
       serviceType: 'zabbix',
       group: 'Інфраструктура',
-      endpointUrl: 'https://zabbix.internal.noc/api_jsonrpc.php',
+      endpointUrl: 'http://192.168.0.241:8080',
       refreshIntervalSec: 3,
       autoRefreshPage: true,
       status: 'nominal',
@@ -1360,7 +1225,7 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
         75,
         90,
         nowEpochMs,
-        'https://zabbix.internal.noc/api_jsonrpc.php'
+        'http://192.168.0.241:8080'
       ),
     },
     {
@@ -1369,7 +1234,7 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
       name: 'Ceph (Seph) Object Storage',
       serviceType: 'ceph',
       group: 'Сховище даних',
-      endpointUrl: 'https://ceph-mgr.internal.noc:8443/api/health/full',
+      endpointUrl: 'http://192.168.0.241:30900/api/health/full',
       refreshIntervalSec: 2,
       autoRefreshPage: true,
       status: 'nominal',
@@ -1393,7 +1258,7 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
         85,
         110,
         nowEpochMs,
-        'https://ceph-mgr.internal.noc:8443/api/health/full'
+        'http://192.168.0.241:30900/api/health/full'
       ),
     },
     {
@@ -1402,7 +1267,7 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
       name: 'Redis In-Memory Cluster',
       serviceType: 'redis',
       group: 'Черги та Кеш',
-      endpointUrl: 'redis://redis-cluster.internal.noc:6379/info',
+      endpointUrl: 'redis://192.168.0.241:30379/info',
       refreshIntervalSec: 1,
       autoRefreshPage: true,
       status: 'nominal',
@@ -1426,7 +1291,7 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
         120,
         155,
         nowEpochMs,
-        'redis://redis-cluster.internal.noc:6379/info'
+        'redis://192.168.0.241:30379/info'
       ),
     },
     {
@@ -1435,7 +1300,7 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
       name: 'RabbitMQ Message Broker',
       serviceType: 'rabbitmq',
       group: 'Черги та Кеш',
-      endpointUrl: 'https://rabbitmq.internal.noc:15672/api/overview',
+      endpointUrl: 'http://192.168.0.241:31672/api/overview',
       refreshIntervalSec: 2,
       autoRefreshPage: true,
       status: 'nominal',
@@ -1459,7 +1324,7 @@ export function createInitialServices(nowEpochMs: number = Date.now()): ServiceF
         45,
         70,
         nowEpochMs,
-        'https://rabbitmq.internal.noc:15672/api/overview'
+        'http://192.168.0.241:31672/api/overview'
       ),
     },
   ];
